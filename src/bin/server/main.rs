@@ -6,19 +6,12 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
-use serde::{Serialize, Deserialize};
 use rocket::{
     http::Status,
     State,
 };
 use rocket_contrib::json::Json;
-
-#[derive(Serialize, Deserialize)]
-struct RegisterData {
-    username: String,
-    pkp: String,
-    pkv: String,
-}
+use synapsis::network::RegisterData;
 
 type StorageInner = HashMap<String, Arc<RwLock<HashMap<String, String>>>>;
 type Storage = RwLock<StorageInner>;
