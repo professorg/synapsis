@@ -7,3 +7,9 @@ pub struct RegisterData {
     pub pkv: String,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct PutData {
+    pub data: String,
+    pub signature: String,
+}
+

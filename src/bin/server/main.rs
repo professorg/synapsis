@@ -11,16 +11,17 @@ use rocket::{
     State,
 };
 use rocket_contrib::json::Json;
-use synapsis::network::RegisterData;
+use synapsis::{
+    crypto::{PublicKeyPair, vrfy},
+    network::{RegisterData, PutData},
+};
 
 type StorageInner = HashMap<String, Arc<RwLock<HashMap<String, String>>>>;
 type Storage = RwLock<StorageInner>;
 
-type Response<T> = Result<Json<T>, Status>;
 
-
-fn make_user(storage: &State<Storage>, user: String) -> Result<Status, Status> {
-    if let Ok(mut storage) = storage.inner().write() {
+fn make_user(storage: &Storage, user: String) -> Result<Status, Status> {
+    if let Ok(mut storage) = storage.write() {
         if storage.contains_key(&user) {
             Err(Status::Conflict)
         } else {
@@ -32,8 +33,8 @@ fn make_user(storage: &State<Storage>, user: String) -> Result<Status, Status> {
     }
 }
 
-fn put_data(storage: &State<Storage>, user: String, path: String, data: String) -> Result<Status, Status> {
-    if let Ok(storage) = storage.inner().read() {
+fn put_data(storage: &Storage, user: String, path: String, data: String) -> Result<Status, Status> {
+    if let Ok(storage) = storage.read() {
         if let Some(inner) = storage.get(&user) {
             if let Ok(mut inner) = inner.write() {
                 inner.insert(path, data);
@@ -49,12 +50,12 @@ fn put_data(storage: &State<Storage>, user: String, path: String, data: String) 
     }
 }
 
-fn get_data(storage: &State<Storage>, user: String, path: String) -> Response<String> {
-    if let Ok(storage) = storage.inner().read() {
+fn get_data(storage: &Storage, user: String, path: String) -> Result<String, Status> {
+    if let Ok(storage) = storage.read() {
         if let Some(inner) = storage.get(&user) {
             if let Ok(inner) = inner.read() {
                 if let Some(data) = inner.get(&path) {
-                    Ok(Json(data.clone()))
+                    Ok(data.clone())
                 } else {
                     Err(Status::NotFound)
                 }
@@ -70,21 +71,128 @@ fn get_data(storage: &State<Storage>, user: String, path: String) -> Response<St
 }
 
 #[get("/<user>/<path>")]
-fn get(storage: State<Storage>, user: String, path: String) -> Response<String> {
-    get_data(&storage, user, path)
+fn get(storage: State<Storage>, user: String, path: String) -> Result<String, Status> {
+    get_data(storage.inner(), user, path)
+}
+
+#[put("/<user>/<path>", format = "application/json", data = "<data>")]
+fn put(storage: State<Storage>, user: String, path: String, data: Json<PutData>) -> Result<Status, Status> {
+    put_data(storage.inner(), user, path, data.data.clone())
 }
 
 #[post("/register", format = "application/json", data = "<data>")]
 fn register(storage: State<Storage>, data: Json<RegisterData>) -> Status {
-    make_user(&storage, data.username.clone())
-        .and(put_data(&storage, data.username.clone(), "pkp".to_string(), data.pkp.clone()))
-        .and(put_data(&storage, data.username.clone(), "pkv".to_string(), data.pkv.clone()))
+    let storage = storage.inner();
+    make_user(storage, data.username.clone())
+        .and(put_data(storage, data.username.clone(), "pkp".to_string(), data.pkp.clone()))
+        .and(put_data(storage, data.username.clone(), "pkv".to_string(), data.pkv.clone()))
         .map_or_else(|o| o, |e| e)
 }
 
-fn main() {
+fn rocket() -> rocket::Rocket {
     rocket::ignite()
         .mount("/", routes![register, get])
-        .manage(RwLock::new(StorageInner::new()))
+        .manage(storage())
+}
+
+fn storage() -> Storage {
+    RwLock::new(StorageInner::new())
+}
+
+fn main() {
+    rocket()
         .launch();
 }
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        rocket,
+        storage,
+        make_user,
+        put_data,
+        get_data,
+    };
+    use rocket::http::Status;
+    use rocket_contrib::json::Json;
+
+    #[test]
+    fn storage_make_user() {
+        let storage = storage();
+        let username = "testuser";
+        assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
+        assert!(
+            storage
+                .read().unwrap()
+                .get(&username.to_string())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn storage_make_user_conflict() {
+        let storage = storage();
+        let username = "testuser";
+        assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
+        assert_eq!(make_user(&storage, username.to_string()), Err(Status::Conflict));
+    }
+
+    #[test]
+    fn storage_put_data() {
+        let storage = storage();
+        let username = "testuser";
+        let path = "some/path";
+        let data = "some_data";
+        assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
+        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), data.to_string()), Ok(Status::Ok));
+        assert_eq!(
+            *storage
+                .read().unwrap()
+                .get(&username.to_string()).unwrap()
+                .read().unwrap()
+                .get(&path.to_string()).unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn storage_put_data_not_found() {
+        let storage = storage();
+        let username = "testuser";
+        let path = "some/path";
+        let data = "some_data";
+        // Do not create the account
+        // assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
+        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), data.to_string()), Err(Status::NotFound));
+    }
+
+    #[test]
+    fn storage_get_data() {
+        let storage = storage();
+        let username = "testuser";
+        let path = "some/path";
+        let data = "some_data";
+        assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
+        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), data.to_string()), Ok(Status::Ok));
+        assert_eq!(get_data(&storage, username.to_string(), path.to_string()).unwrap(), data.to_string());
+    }
+
+    #[test]
+    fn storage_get_data_user_not_found() {
+        let storage = storage();
+        let username = "testuser";
+        let path = "some/path";
+        assert_eq!(get_data(&storage, username.to_string(), path.to_string()), Err(Status::NotFound));
+    }
+
+    #[test]
+    fn storage_get_data_path_not_found() {
+        let storage = storage();
+        let username = "testuser";
+        let path = "some/path";
+        assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
+        assert_eq!(get_data(&storage, username.to_string(), path.to_string()), Err(Status::NotFound));
+    }
+
+}
+
