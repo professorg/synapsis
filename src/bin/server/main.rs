@@ -12,7 +12,7 @@ use rocket::{
 };
 use rocket_contrib::json::Json;
 use synapsis::{
-    crypto::{PublicKeyPair, vrfy},
+    crypto::{VerifyKeyPair, vrfy},
     network::{RegisterData, PutData},
 };
 
@@ -77,21 +77,31 @@ fn get(storage: State<Storage>, user: String, path: String) -> Result<String, St
 
 #[put("/<user>/<path>", format = "application/json", data = "<data>")]
 fn put(storage: State<Storage>, user: String, path: String, data: Json<PutData>) -> Result<Status, Status> {
-    put_data(storage.inner(), user, path, data.data.clone())
+    let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
+    let pk: VerifyKeyPair = serde_json::from_str(&pk[..])
+        .map_err(|_| Status::InternalServerError)?;
+    if vrfy(&data.data.as_bytes(), data.signature, &pk) {
+        put_data(storage.inner(), user.clone(), path, data.data.clone())
+    } else {
+        Err(Status::Unauthorized)
+    }
 }
 
 #[post("/register", format = "application/json", data = "<data>")]
-fn register(storage: State<Storage>, data: Json<RegisterData>) -> Status {
+fn register(storage: State<Storage>, data: Json<RegisterData>) -> Result<Status, Status> {
     let storage = storage.inner();
+    let pkp = serde_json::ser::to_string(&data.pkp)
+        .map_err(|_| Status::InternalServerError)?;
+    let pkv = serde_json::ser::to_string(&data.pkv)
+        .map_err(|_| Status::InternalServerError)?;
     make_user(storage, data.username.clone())
-        .and(put_data(storage, data.username.clone(), "pkp".to_string(), data.pkp.clone()))
-        .and(put_data(storage, data.username.clone(), "pkv".to_string(), data.pkv.clone()))
-        .map_or_else(|o| o, |e| e)
+        .and(put_data(storage, data.username.clone(), "pkp".to_string(), pkp))
+        .and(put_data(storage, data.username.clone(), "pkv".to_string(), pkv))
 }
 
 fn rocket() -> rocket::Rocket {
     rocket::ignite()
-        .mount("/", routes![register, get])
+        .mount("/", routes![register, get, put])
         .manage(storage())
 }
 
@@ -114,7 +124,6 @@ mod test {
         get_data,
     };
     use rocket::http::Status;
-    use rocket_contrib::json::Json;
 
     #[test]
     fn storage_make_user() {

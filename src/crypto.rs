@@ -9,26 +9,35 @@ use crypto::{
 use serde::{
     Serialize,
     Deserialize,
+    /*
     ser::{SerializeStruct, Serializer},
     de::{self, Deserializer, Visitor, SeqAccess, MapAccess},
+    */
 };
 use std::{
+    /*
     fmt,
+    */
     iter::repeat,
     io::Cursor,
 };
 use byteorder::{BigEndian, ReadBytesExt};
 use p256::{
+    /*
     EncodedPoint,
+    */
     elliptic_curve::rand_core::{
         self, CryptoRng, RngCore, impls, OsRng
     },
+    /*
     ecdsa::{
         SigningKey, VerifyingKey, Signature,
         signature::{Signer, Verifier},
     },
+    */
 };
-use ecies_ed25519::{self, PublicKey, SecretKey, Error::InvalidSecretKeyBytes};
+use ecies_ed25519::{self, Error::InvalidSecretKeyBytes};
+use ed25519_dalek::{self, Keypair, Signature, Signer, Verifier};
 
 struct Sha256Rng(Sha256);
 
@@ -66,12 +75,36 @@ impl RngCore for Sha256Rng {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct PrivateKey(Vec<u8>);
+pub struct PrivateKey(pub Vec<u8>);
 
 #[derive(Serialize, Deserialize)]
 pub struct PublicKeyPair {
-    pk: PublicKey,
-    sk: Option<SecretKey>,
+    pub pk: ecies_ed25519::PublicKey,
+    pub sk: Option<ecies_ed25519::SecretKey>,
+}
+
+impl PublicKeyPair {
+    pub fn pubkey(&self) -> PublicKeyPair {
+        PublicKeyPair {
+            pk: self.pk.clone(),
+            sk: None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum VerifyKeyPair {
+    Keypair(Keypair),
+    PubKey(ed25519_dalek::PublicKey),
+}
+
+impl VerifyKeyPair {
+    pub fn pubkey(&self) -> VerifyKeyPair {
+        match self {
+            VerifyKeyPair::Keypair(kp) => VerifyKeyPair::PubKey(kp.public.clone()),
+            VerifyKeyPair::PubKey(pk) => VerifyKeyPair::PubKey(pk.clone()),
+        }
+    }
 }
 
 /*
@@ -212,6 +245,12 @@ pub fn gen_pub(username: &str, password: &str) -> PublicKeyPair {
     }
 }
 
+pub fn gen_ver(username: &str, password: &str) -> VerifyKeyPair {
+    let mut rng = Sha256Rng::new(username, password);
+    let keypair: Keypair = Keypair::generate(&mut rng);
+    VerifyKeyPair::Keypair(keypair)
+}
+
 /*
 pub fn gen_ver(username: &str, password: &str) -> VerifyKeyPair {
     let signing_key = SigningKey::random(Sha256Rng::new(username, password));
@@ -250,6 +289,20 @@ pub fn dec_pub(message: &[u8], keys: &PublicKeyPair) -> Result<Vec<u8>, ecies_ed
     output
 }
 
+pub fn sign(message: &[u8], keys: &VerifyKeyPair) -> Option<Signature> {
+    match keys {
+        VerifyKeyPair::Keypair(keypair) => Some(keypair.sign(message)),
+        VerifyKeyPair::PubKey(_) => None,
+    }
+}
+
+pub fn vrfy(message: &[u8], signature: Signature, keys: &VerifyKeyPair) -> bool {
+    match keys {
+        VerifyKeyPair::Keypair(keypair) => keypair.verify(message, &signature).is_ok(),
+        VerifyKeyPair::PubKey(pk) => pk.verify(message, &signature).is_ok(),
+    }
+}
+
 /*
 pub fn sign(message: &[u8], keys: &VerifyKeyPair) -> Option<Signature> {
     let sk = keys.sk.as_ref()?;
@@ -265,12 +318,49 @@ pub fn vrfy(message: &[u8], signature: Signature, keys: &VerifyKeyPair) -> bool 
 #[cfg(test)]
 mod test {
     use super::{
-        gen_prv, PrivateKey, enc_prv, dec_prv,
-        gen_pub, PublicKeyPair, enc_pub, dec_pub,
-        gen_ver, VerifyKeyPair, sign, vrfy,
+        gen_prv, enc_prv, dec_prv,
+        gen_pub, enc_pub, dec_pub,
+        gen_ver, sign, vrfy,
     };
-    use p256::ecdsa::signature::{Signer, Verifier};
     
+    #[test]
+    fn sign_verify() {
+        let username = "some_user";
+        let password = "some_pass";
+        let keys = gen_ver(username, password);
+
+        let message = b"This is a message.";
+        let signature = sign(message, &keys).unwrap();
+        assert!(vrfy(message, signature, &keys));
+    }
+ 
+    #[test]
+    #[should_panic]
+    fn sign_verify_no_sk() {
+        let username = "some_user";
+        let password = "some_pass";
+        let keys = gen_ver(username, password);
+        let keys = keys.pubkey();
+
+        let message = b"This is a message.";
+        sign(message, &keys).unwrap();
+    }
+ 
+    #[test]
+    fn sign_verify_wrong_signature() {
+        let username = "some_user";
+        let password = "some_pass";
+        let keys1 = gen_ver(username, password);
+
+        let username = "some_other_user";
+        let password = "some_other_pass";
+        let keys2 = gen_ver(username, password);
+
+        let message = b"This is a message.";
+        let signature = sign(message, &keys1).unwrap();
+        assert!(!vrfy(message, signature, &keys2));
+    }
+    /*
     #[test]
     fn verify_key_pair_serde_json() {
         let username = "some_user";
@@ -345,6 +435,7 @@ mod test {
         let signature = sign(message, &keys1).unwrap();
         assert!(!vrfy(message, signature, &keys2));
     }
+    */
 
     #[test]
     fn encrypt_prv() {
@@ -366,7 +457,7 @@ mod test {
 
         let username = "some_other_user";
         let password = "some_other_pass";
-        let mut key2 = gen_prv(username, password);
+        let key2 = gen_prv(username, password);
 
         let message = b"This is a message.";
         let (nonce, ciphertext) = enc_prv(message, &mut key1);
@@ -382,8 +473,9 @@ mod test {
 
         let message = b"This is a message.";
         let (nonce, ciphertext) = enc_prv(message, &mut key);
-        let (nonce, _) = enc_prv(message, &mut key);    // replace nonce with next
-        let message_de = dec_prv(&ciphertext[..], &key, &nonce[..]);
+        let (nonce_wrong, _) = enc_prv(message, &mut key);    // replace nonce with next
+        let message_de = dec_prv(&ciphertext[..], &key, &nonce_wrong[..]);
+        assert_ne!(nonce, nonce_wrong);
         assert_ne!(message, &message_de[..]);
     }
 
@@ -409,7 +501,7 @@ mod test {
 
         let message = b"This is a message.";
         let ciphertext = enc_pub(message, &keys);
-        let message_de = dec_pub(&ciphertext[..], &keys).unwrap();
+        dec_pub(&ciphertext[..], &keys).unwrap();
     }
 
     #[test]

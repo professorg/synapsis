@@ -21,4 +21,4 @@ rust-crypto = "0.2.36"
 byteorder = "1.4.2"
 p256 = { version = "0.7.2", features = ["ecdsa"] }
 ecies-ed25519 = { version = "0.5.0", features = ["serde"] }
-ed25519-dalek = "1.0.1"
+ed25519-dalek = { version = "1.0.1", features = ["serde"] }
