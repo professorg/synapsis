@@ -5,6 +5,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
+    path::PathBuf,
 };
 use rocket::{
     http::Status,
@@ -70,13 +71,15 @@ fn get_data(storage: &Storage, user: String, path: String) -> Result<String, Sta
     }
 }
 
-#[get("/<user>/<path>")]
-fn get(storage: State<Storage>, user: String, path: String) -> Result<String, Status> {
+#[get("/<user>/<path..>")]
+fn get(storage: State<Storage>, user: String, path: PathBuf) -> Result<String, Status> {
+    let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
     get_data(storage.inner(), user, path)
 }
 
-#[put("/<user>/<path>", format = "application/json", data = "<data>")]
-fn put(storage: State<Storage>, user: String, path: String, data: Json<PutData>) -> Result<Status, Status> {
+#[put("/<user>/<path..>", format = "application/json", data = "<data>")]
+fn put(storage: State<Storage>, user: String, path: PathBuf, data: Json<PutData>) -> Result<Status, Status> {
+    let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
     let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
     let pk: VerifyKeyPair = serde_json::from_str(&pk[..])
         .map_err(|_| Status::InternalServerError)?;

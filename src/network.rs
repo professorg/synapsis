@@ -1,3 +1,4 @@
+use std::time::Duration;
 use serde::{Serialize, Deserialize};
 use crate::crypto::{PublicKeyPair, VerifyKeyPair};
 use ed25519_dalek::Signature;
@@ -17,18 +18,17 @@ pub struct PutData {
 
 #[derive(Serialize, Deserialize)]
 pub struct MessageData {
-    pub from: String,
     pub to: String,
     pub message: String,
 }
 
-type UID = u64;
+pub type UID = u64;
 
 #[derive(Serialize, Deserialize)]
 pub struct Message {
-    pub message: String,
-    pub uid: UID,
+    pub message: Vec<u8>,
+    pub message_cc: (Vec<u8>, Vec<u8>),
+    pub timestamp: Duration,
     pub prev: Option<UID>,
-    pub next: Option<UID>,
 }
 
