@@ -1,12 +1,17 @@
-use synapsis::network::{RegisterData, PutData, MessageData, Message, UID};
-use synapsis::crypto::{
-    gen_pub, enc_pub, dec_pub, PublicKeyPair,
-    gen_ver, sign, VerifyKeyPair,
-    gen_prv, enc_prv, dec_prv, PrivateKey,
+use synapsis::{
+    network::{RegisterData, PutData, MessageData, Message, UID},
+    crypto::{
+        gen_pub, enc_pub, dec_pub, PublicKeyPair,
+        gen_ver, sign, VerifyKeyPair,
+        gen_prv, enc_prv, dec_prv, PrivateKey,
+    },
 };
 use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use reqwest::blocking::{Client, Response};
-use std::time::{SystemTime, Duration, UNIX_EPOCH};
+use std::{
+    io::{stdin, stdout, Write},
+    time::{SystemTime, Duration, UNIX_EPOCH},
+};
 
 struct Connection {
     address: String,
@@ -18,18 +23,21 @@ struct Connection {
 }
 
 impl Connection {
-    fn new(address: &str, username: &str, password: &str) -> Result<Self, reqwest::Error> {
+    fn new(address: &str, username: &str, password: &str, register: bool) -> Result<Self, reqwest::Error> {
         let pub_keypair = gen_pub(username, password);
         let ver_keypair = gen_ver(username, password);
         let sk = gen_prv(username, password);
 
         let client = reqwest::blocking::Client::new();
-        let data = RegisterData {
-            username: username.to_string(),
-            pkp: pub_keypair.pubkey(),
-            pkv: ver_keypair.pubkey(),
-        };
-        register_keys(&format!("{}/register", address)[..], &client, data)?;
+
+        if register {
+            let data = RegisterData {
+                username: username.to_string(),
+                pkp: pub_keypair.pubkey(),
+                pkv: ver_keypair.pubkey(),
+            };
+            register_keys(&format!("{}/register", address)[..], &client, data)?;
+        }
 
         Ok(Connection {
             address: address.to_string(),
@@ -42,15 +50,15 @@ impl Connection {
     }
 }
 
-struct Messages {
-    conn: Connection,
+struct Messages<'a> {
+    conn: &'a Connection,
     with: String, 
     sent: Option<(String, Duration, Option<UID>)>,
     recv: Option<(String, Duration, Option<UID>)>,
 }
 
-impl Messages {
-    fn new(conn: Connection, with: String) -> Self {
+impl<'a> Messages<'a> {
+    fn new(conn: &'a Connection, with: String) -> Self {
         let sent = get_sent_message_head(&conn, with.clone());
         let recv = get_recv_message_head(&conn, with.clone());
         Messages {
@@ -62,7 +70,7 @@ impl Messages {
     }
 }
 
-impl Iterator for Messages {
+impl<'a> Iterator for Messages<'a> {
     type Item = (String, String, Duration);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -87,7 +95,7 @@ impl Iterator for Messages {
             } else { None };
             Some((sent.0, self.conn.username.clone(), sent.1))
         } else if self.recv.is_some() {
-            let recv = self.sent.take().unwrap();
+            let recv = self.recv.take().unwrap();
             self.recv = if let Some(uid) = recv.2 {
                 get_recv_message(&self.conn, self.with.clone(), uid)
             } else { None };
@@ -107,7 +115,7 @@ fn get_sent_message(conn: &Connection, to: String, uid: UID) -> Option<(String, 
 
 fn get_sent_message_head(conn: &Connection, to: String) -> Option<(String, Duration, Option<UID>)> {
     let data = get_data(&format!("{}/{}/{}/head", conn.address, conn.username.clone(), to)[..], &conn.client).ok()?.text().ok()?;
-    let head: Option<UID> = serde_json::from_str(&data[..]).unwrap();
+    let head: Option<UID> = serde_json::from_str(&data[..]).ok()?;
     let head: UID = head?;
     get_sent_message(conn, to, head)
 }
@@ -227,56 +235,60 @@ fn get_data(address: &str, client: &Client) -> reqwest::Result<Response> {
 }
 
 fn main() {
-    let address = "http://localhost:8000";
+    let mut input = String::new();
 
-    let username = "some_user";
-    let password = "some_pass";
+    print!("Server address: ");
+    stdout().flush().unwrap();
+    stdin().read_line(&mut input).unwrap();
+    input.pop();
+    let address = &input.clone()[..];
+    print!("Username: ");
+    stdout().flush().unwrap();
+    input.clear();
+    stdin().read_line(&mut input).unwrap();
+    input.pop();
+    let username = &input.clone()[..];
+    print!("Password: ");
+    stdout().flush().unwrap();
+    input.clear();
+    stdin().read_line(&mut input).unwrap();
+    input.pop();
+    let password = &input.clone()[..];
+    print!("Register? (y/n) ");
+    stdout().flush().unwrap();
+    input.clear();
+    stdin().read_line(&mut input).unwrap();
+    input.pop();
+    let register = input.remove(0) == 'y';
 
-    let mut conn1 = Connection::new(address, username, password).unwrap();
+    let mut conn = Connection::new(address, username, password, register).unwrap();
 
-    let username = "some_other_user";
-    let password = "some_other_pass";
+    print!("Chat partner: ");
+    stdout().flush().unwrap();
+    input.clear();
+    stdin().read_line(&mut input).unwrap();
+    input.pop();
+    let partner = &input.clone()[..];
 
-    let mut conn2 = Connection::new(address, username, password).unwrap();
-
-    send_chat_message(&mut conn1, &MessageData {
-        to: conn2.username.clone(),
-        message: "Hello, world!".to_string(),
-    }).unwrap();
-
-    send_chat_message(&mut conn2, &MessageData {
-        to: conn1.username.clone(),
-        message: "Hello kind sir. How do you do?".to_string(),
-    }).unwrap();
-
-    send_chat_message(&mut conn1, &MessageData {
-        to: conn2.username.clone(),
-        message: "Quite well my fine fellow.".to_string(),
-    }).unwrap();
-
-    send_chat_message(&mut conn1, &MessageData {
-        to: conn2.username.clone(),
-        message: "Oh, dear, it seems Samuel is having an affair with a new mistress".to_string(),
-    }).unwrap();
-
-    send_chat_message(&mut conn2, &MessageData {
-        to: conn1.username.clone(),
-        message: "Nothing good ever comes from that putrid man.".to_string(),
-    }).unwrap();
-
-    send_chat_message(&mut conn1, &MessageData {
-        to: conn2.username.clone(),
-        message: "Quite true indeed. Say, shall we meet at the inn to morrow, that we may talk of matters of state?".to_string(),
-    }).unwrap();
-
-    send_chat_message(&mut conn2, &MessageData {
-        to: conn1.username.clone(),
-        message: "That would be splendid.".to_string(),
-    }).unwrap();
-
-    let messages = Messages::new(conn1, conn2.username.clone());
-    for message in messages {
-        println!("({}) {}: {}", message.2.as_nanos(), message.1, message.0);
+    loop {
+        print!("> ");
+        stdout().flush().unwrap();
+        input.clear();
+        stdin().read_line(&mut input).unwrap();
+        input.pop();
+        if input.eq_ignore_ascii_case(".exit") {
+            break;
+        } else if input.is_empty() {
+            let messages = Messages::new(&conn, partner.to_string());
+            for msg in messages.collect::<Vec<_>>().iter().rev() {
+                println!("{}: {}", msg.1, msg.0);
+            }
+        } else {
+            send_chat_message(&mut conn, &MessageData {
+                to: partner.to_string(),
+                message: input.clone(),
+            }).unwrap();
+        }
     }
 }
 
