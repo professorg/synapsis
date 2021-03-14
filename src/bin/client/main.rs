@@ -270,63 +270,291 @@ fn get_data(address: &str, client: &Client) -> reqwest::Result<Response> {
         .send()
 }
 
+enum ReadState {
+    ServerList,
+    AddServer,
+    SelectServer(AfterSelectServer),
+    Login(usize),
+    RemoveServer(usize),
+    FriendList(usize),
+    AddFriend(usize),
+    SelectFriend(usize, AfterSelectFriend),
+    RemoveFriend(usize, usize),
+    Chat(usize, usize, Option<UID>),
+}
+
+enum AfterSelectServer {
+    Login,
+    Remove,
+    Connect,
+}
+
+enum AfterSelectFriend {
+    Remove,
+    Open,
+}
+
 fn cmd_client() {
+    use ReadState::*;
+
     let mut input = String::new();
-
-    print!("Server address: ");
-    stdout().flush().unwrap();
-    stdin().read_line(&mut input).unwrap();
-    input.pop();
-    let address = &input.clone()[..];
-    print!("Username: ");
-    stdout().flush().unwrap();
-    input.clear();
-    stdin().read_line(&mut input).unwrap();
-    input.pop();
-    let username = &input.clone()[..];
-    print!("Password: ");
-    stdout().flush().unwrap();
-    input.clear();
-    stdin().read_line(&mut input).unwrap();
-    input.pop();
-    let password = &input.clone()[..];
-    print!("Register? (y/n) ");
-    stdout().flush().unwrap();
-    input.clear();
-    stdin().read_line(&mut input).unwrap();
-    input.pop();
-    let register = input.remove(0) == 'y';
-
-    let mut conn = Connection::new(address, username, password, register).unwrap();
-
-    print!("Chat partner: ");
-    stdout().flush().unwrap();
-    input.clear();
-    stdin().read_line(&mut input).unwrap();
-    input.pop();
-    let partner = &input.clone()[..];
-    let mut until: Option<UID> = None;
+    let mut servers: Vec<(String, Option<Connection>, Vec<String>)> = Vec::new();
+    let mut state = ReadState::ServerList;
     loop {
-        print!("> ");
-        stdout().flush().unwrap();
         input.clear();
-        stdin().read_line(&mut input).unwrap();
-        input.pop();
-        if input.eq_ignore_ascii_case(".exit") {
-            break;
-        } else {
-            if !input.is_empty() {
-                send_chat_message(&mut conn, &MessageData {
-                    to: partner.to_string(),
-                    message: input.clone(),
-                }).unwrap();
+        state = match state {
+            ServerList => {
+                println!("add: Add server");
+                println!("login: Log into server");
+                println!("remove: Remove a server");
+                println!("connect: Connect to server");
+                println!("exit: Quit Synapsis");
+                println!("quit: Quit Synapsis");
+                print!("> ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let mut args = input.split_whitespace();
+                match args.next() {
+                    Some("add") => AddServer,
+                    Some("login") => SelectServer(AfterSelectServer::Login),
+                    Some("remove") => SelectServer(AfterSelectServer::Remove),
+                    Some("connect") => SelectServer(AfterSelectServer::Connect),
+                    Some("exit") => break,
+                    Some("quit") => break,
+                    _ => ServerList
+                }
             }
-            let messages = Messages::new(&conn, partner.to_string(), until);
-            for msg in messages.collect::<Vec<_>>().iter().rev() {
-                until = Some(msg.uid);
-                println!("{}: {}", msg.from, msg.message);
+            AddServer => {
+                print!("Server address: ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                servers.push((input.clone(), None, Vec::new()));
+                ServerList
             }
-        }
+            SelectServer(next_state) => {
+                println!("Select a server:");
+                for (i, server) in servers.iter().enumerate() {
+                    println!("{:3} {}", i + 1, server.0);
+                }
+                print!("> ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let index = match input.split_whitespace().next() {
+                    Some(i) => match i.parse::<usize>() {
+                        Ok(i) => {
+                            if (1..=servers.len()).contains(&i) {
+                                Some(i)
+                            } else {
+                                println!("Could not select server: index out of range");
+                                None
+                            }
+                        }
+                        _ => {
+                            println!("Could not select server: index can't be parsed");
+                            None
+                        }
+                    },
+                    None => {
+                        println!("Could not select server: no index provided");
+                        None
+                    },
+                };
+                match (index, next_state) {
+                    (Some(i), AfterSelectServer::Login) => Login(i - 1),
+                    (Some(i), AfterSelectServer::Remove) => RemoveServer(i - 1),
+                    (Some(i), AfterSelectServer::Connect) => FriendList(i - 1),
+                    (None, _) => ServerList
+                }
+            }
+            Login(i) => {
+                print!("Register? (y/n) ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let mut chars = input.chars();
+                let register = match chars.next() {
+                    Some('y') => true,
+                    _ => false,
+                };
+
+                input.clear();
+                print!("Username: ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let username = input.clone();
+
+                input.clear();
+                print!("Password: ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let password = input.clone();
+
+                if register {
+                    input.clear();
+                    print!("Confirm: ");
+                    stdout().flush().unwrap();
+                    stdin().read_line(&mut input).unwrap();
+                    input.pop();
+                    let confirm = input.clone();
+
+                    if password == confirm {
+                        match Connection::new(&servers[i].0[..], &username[..], &password[..], true) {
+                            Ok(conn) => {
+                                servers[i].1 = Some(conn);
+                                FriendList(i)
+                            }
+                            Err(_) => {
+                                println!("Could not register: connection could not be established");
+                                ServerList
+                            }
+                        }
+                    } else {
+                        println!("Could not register: passwords don't match");
+                        ServerList
+                    }
+                } else {
+                    match Connection::new(&servers[i].0[..], &username[..], &password[..], false) {
+                        Ok(conn) => {
+                            servers[i].1 = Some(conn);
+                            FriendList(i)
+                        }
+                        Err(_) => {
+                            println!("Could not register: connection could not be established");
+                            ServerList
+                        }
+                    }
+                }
+            }
+            RemoveServer(i) => {
+                print!("Are you sure you want to remove the server? (y/n) ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let mut chars = input.chars();
+                match chars.next() {
+                    Some('y') => {
+                        servers.remove(i);
+                    }
+                    _ => (),
+                };
+                ServerList
+            }
+            FriendList(i) => {
+                println!("add: Add friend");
+                println!("remove: Remove friend");
+                println!("open: Open chat");
+                println!("exit: Exit to server list");
+                println!("quit: Quit Synapsis");
+                print!("> ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let mut args = input.split_whitespace();
+                match args.next() {
+                    Some("add") => AddFriend(i),
+                    Some("remove") => SelectFriend(i, AfterSelectFriend::Remove),
+                    Some("open") => SelectFriend(i, AfterSelectFriend::Open),
+                    Some("exit") => ServerList,
+                    Some("quit") => break,
+                    _ => FriendList(i)
+                }
+            }
+            AddFriend(i) => {
+                print!("Friend username: ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                servers[i].2.push(input.clone());
+                FriendList(i)
+            }
+            SelectFriend(i, next_state) => {
+                println!("Select a friend:");
+                for (j, friend) in servers[i].2.iter().enumerate() {
+                    println!("{:3} {}", j + 1, friend);
+                }
+                print!("> ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let index = match input.split_whitespace().next() {
+                    Some(j) => match j.parse::<usize>() {
+                        Ok(j) => {
+                            if (1..=servers[i].2.len()).contains(&j) {
+                                Some(j)
+                            } else {
+                                println!("Could not select friend: index out of range");
+                                None
+                            }
+                        }
+                        _ => {
+                            println!("Could not select friend: index can't be parsed");
+                            None
+                        }
+                    },
+                    None => {
+                        println!("Could not select friend: no index provided");
+                        None
+                    },
+                };
+                match (index, next_state) {
+                    (Some(j), AfterSelectFriend::Remove) => RemoveFriend(i, j - 1),
+                    (Some(j), AfterSelectFriend::Open) => {
+                        println!("/exit: exit to friends list");
+                        println!("/quit: quit Synapsis");
+                        println!("Leave blank to get new messages.");
+                        println!("All other inputs are sent as messages.");
+                        Chat(i, j - 1, None)
+                    },
+                    (None, _) => FriendList(i)
+                }
+            }
+            RemoveFriend(i, j) => {
+                print!("Are you sure you want to remove the friend? (y/n) ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let mut chars = input.chars();
+                match chars.next() {
+                    Some('y') => {
+                        servers[i].2.remove(j);
+                    }
+                    _ => (),
+                };
+                FriendList(i)
+            }
+            Chat(i, j, until) => {
+                let mut last: Option<UID> = None;
+                print!("> ");
+                stdout().flush().unwrap();
+                input.clear();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                if input.eq_ignore_ascii_case("/exit") {
+                    FriendList(i)
+                } else if input.eq_ignore_ascii_case("/quit") {
+                    break;
+                } else {
+                    if !input.is_empty() {
+                        let to = servers[i].2[j].clone();
+                        send_chat_message(&mut servers[i].1.as_mut().unwrap(), &MessageData {
+                            to: to,
+                            message: input.clone(),
+                        }).unwrap();
+                    }
+                    let messages = Messages::new(&servers[i].1.as_ref().unwrap(), servers[i].2[j].clone(), until);
+                    for msg in messages.collect::<Vec<_>>().iter().rev() {
+                        last = Some(msg.uid);
+                        println!("{}: {}", msg.from, msg.message);
+                    }
+                    Chat(i, j, last)
+                }
+            }
+        };
     }
 }
 
