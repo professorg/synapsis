@@ -456,22 +456,13 @@ fn cmd_client() {
                 let username = input.clone();
 
                 input.clear();
-                print!("Password: ");
-                stdout().flush().unwrap();
-                stdin().read_line(&mut input).unwrap();
-                input.pop();
-                let password = input.clone();
+                let password = rpassword::prompt_password_stdout("Password: ").unwrap();
 
                 if username.is_empty() || password.is_empty() {
                     println!("Could not login: username and password must be non-empty");
                     ServerList
                 } else if register {
-                    input.clear();
-                    print!("Confirm: ");
-                    stdout().flush().unwrap();
-                    stdin().read_line(&mut input).unwrap();
-                    input.pop();
-                    let confirm = input.clone();
+                    let confirm = rpassword::prompt_password_stdout("Confirm: ").unwrap();
 
                     if password == confirm {
                         match Connection::new(&servers[i].0[..], &username[..], &password[..], true) {
@@ -599,7 +590,7 @@ fn cmd_client() {
                 FriendList(i)
             }
             Chat(i, j, until) => {
-                let mut last: Option<UID> = None;
+                let mut last: Option<UID> = until;
                 print!("> ");
                 stdout().flush().unwrap();
                 input.clear();

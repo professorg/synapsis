@@ -11,6 +11,7 @@ name = "synapsis"
 path = "src/lib.rs"
 
 [dependencies]
+rpassword = "5.0.1"
 ctrlc = "3.1.8"
 reqwest = { version = "0.11.1", features = ["json", "blocking"] }
 rocket = "0.4.7"
