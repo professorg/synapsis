@@ -394,7 +394,10 @@ fn cmd_client() {
                 input.pop();
                 let password = input.clone();
 
-                if register {
+                if username.is_empty() || password.is_empty() {
+                    println!("Could not login: username and password must be non-empty");
+                    ServerList
+                } else if register {
                     input.clear();
                     print!("Confirm: ");
                     stdout().flush().unwrap();
@@ -541,10 +544,13 @@ fn cmd_client() {
                 } else {
                     if !input.is_empty() {
                         let to = servers[i].2[j].clone();
-                        send_chat_message(&mut servers[i].1.as_mut().unwrap(), &MessageData {
+                        let res = send_chat_message(&mut servers[i].1.as_mut().unwrap(), &MessageData {
                             to: to,
                             message: input.clone(),
-                        }).unwrap();
+                        });
+                        if res.is_err() {
+                            println!("Failed to send message. User not found.");
+                        }
                     }
                     let messages = Messages::new(&servers[i].1.as_ref().unwrap(), servers[i].2[j].clone(), until);
                     for msg in messages.collect::<Vec<_>>().iter().rev() {
