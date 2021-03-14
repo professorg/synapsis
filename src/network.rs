@@ -30,5 +30,6 @@ pub struct Message {
     pub message_cc: (Vec<u8>, Vec<u8>),
     pub timestamp: Duration,
     pub prev: Option<UID>,
+    pub uid: UID,
 }
 
