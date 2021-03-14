@@ -1,6 +1,3 @@
-extern crate gtk;
-extern crate gio;
-
 use synapsis::{
     network::{RegisterData, PutData, MessageData, Message, UID},
     crypto::{
@@ -15,12 +12,6 @@ use std::{
     io::{stdin, stdout, Write},
     time::{SystemTime, Duration, UNIX_EPOCH},
 };
-use gtk::{
-    prelude::*,
-    Application, ApplicationWindow, Button,
-};
-use gio::prelude::*;
-
 
 
 struct Connection {
@@ -339,32 +330,8 @@ fn cmd_client() {
     }
 }
 
-fn gtk_client() {
-    let application = Application::new(
-        Some("us.kosdt.professorg.synapsis"),
-        Default::default(),
-    ).expect("failed to initalize GTK application");
-
-    application.connect_activate(|app| {
-        let window = ApplicationWindow::new(app);
-        window.set_title("Synapsis");
-        window.set_default_size(350, 70);
-
-        let button = Button::with_label("Click me!");
-        button.connect_clicked(|_| {
-            println!("Clicked!");
-        });
-        window.add(&button);
-
-        window.show_all();
-    });
-
-    application.run(&[]);
-}
-
 fn main() {
     cmd_client();
-    //gtk_client();
 }
 
 
