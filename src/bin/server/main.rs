@@ -6,6 +6,8 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
     path::PathBuf,
+    process,
+    fs,
 };
 use rocket::{
     http::Status,
@@ -18,7 +20,7 @@ use synapsis::{
 };
 
 type StorageInner = HashMap<String, Arc<RwLock<HashMap<String, String>>>>;
-type Storage = RwLock<StorageInner>;
+type Storage = Arc<RwLock<StorageInner>>;
 
 
 fn make_user(storage: &Storage, user: String) -> Result<Status, Status> {
@@ -103,13 +105,23 @@ fn register(storage: State<Storage>, data: Json<RegisterData>) -> Result<Status,
 }
 
 fn rocket() -> rocket::Rocket {
+    let storage = storage();
+    let ctrlc_storage = storage.clone();
+
+    ctrlc::set_handler(move || {
+        fs::write("database.json", serde_json::to_string(&ctrlc_storage).unwrap()).unwrap();
+        process::exit(0);
+    }).expect("Error setting Ctrl-C handler");
+
     rocket::ignite()
         .mount("/", routes![register, get, put])
-        .manage(storage())
+        .manage(storage)
 }
 
 fn storage() -> Storage {
-    RwLock::new(StorageInner::new())
+    fs::read_to_string("database.json").ok()
+        .and_then(|db| serde_json::from_str::<Storage>(&db[..]).ok())
+        .unwrap_or_default()
 }
 
 fn main() {

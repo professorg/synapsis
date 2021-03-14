@@ -9,6 +9,7 @@ use synapsis::{
 use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use reqwest::blocking::{Client, Response};
 use std::{
+    fs,
     io::{stdin, stdout, Write},
     time::{SystemTime, Duration, UNIX_EPOCH},
 };
@@ -272,6 +273,9 @@ fn get_data(address: &str, client: &Client) -> reqwest::Result<Response> {
 
 enum ReadState {
     ServerList,
+    SelectFile(AfterSelectFile),
+    Save(String),
+    Load(String),
     AddServer,
     SelectServer(AfterSelectServer),
     Login(usize),
@@ -281,6 +285,11 @@ enum ReadState {
     SelectFriend(usize, AfterSelectFriend),
     RemoveFriend(usize, usize),
     Chat(usize, usize, Option<UID>),
+}
+
+enum AfterSelectFile {
+    Save,
+    Load,
 }
 
 enum AfterSelectServer {
@@ -305,6 +314,8 @@ fn cmd_client() {
         state = match state {
             ServerList => {
                 println!("add: Add server");
+                println!("save: Save server list to file");
+                println!("load: Load server list from file");
                 println!("login: Log into server");
                 println!("remove: Remove a server");
                 println!("connect: Connect to server");
@@ -317,6 +328,8 @@ fn cmd_client() {
                 let mut args = input.split_whitespace();
                 match args.next() {
                     Some("add") => AddServer,
+                    Some("save") => SelectFile(AfterSelectFile::Save),
+                    Some("load") => SelectFile(AfterSelectFile::Load),
                     Some("login") => SelectServer(AfterSelectServer::Login),
                     Some("remove") => SelectServer(AfterSelectServer::Remove),
                     Some("connect") => SelectServer(AfterSelectServer::Connect),
@@ -324,6 +337,57 @@ fn cmd_client() {
                     Some("quit") => break,
                     _ => ServerList
                 }
+            }
+            SelectFile(next_state) => {
+                print!("Filename: ");
+                stdout().flush().unwrap();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let file = input.clone();
+                match next_state {
+                    AfterSelectFile::Save => Save(file),
+                    AfterSelectFile::Load => Load(file),
+                }
+            }
+            Save(file) => {
+                let servers: Vec<(String, Vec<String>)> = servers.iter()
+                    .map(|server| (server.0.clone(), server.2.clone()))
+                    .collect();
+                let servers = serde_json::to_string(&servers);
+                match servers {
+                    Ok(servers) => {
+                        if fs::write(file, servers).is_err() {
+                            println!("Failed to save server list");
+                        }
+                    }
+                    Err(_) => {
+                        println!("Failed to save server list");
+                    }
+                }
+                ServerList
+            }
+            Load(file) => {
+                let servers_str = fs::read_to_string(file); 
+                match servers_str {
+                    Ok(servers_str) => {
+                        let servers_de  = serde_json::from_str::<Vec<(String, Vec<String>)>>(&servers_str[..]);
+                        match servers_de {
+                            Ok(servers_de) => {
+                                let mut servers_ld: Vec<(String, Option<Connection>, Vec<String>)> = servers_de.iter().cloned()
+                                    .map(|(s, f)| (s, None, f))
+                                    .collect();
+                                servers.append(&mut servers_ld);
+                            }
+                            Err(_) => {
+                                println!("Failed to load server list");
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        println!("Failed to load server list");
+                    }
+                }
+                ServerList
             }
             AddServer => {
                 print!("Server address: ");
@@ -336,7 +400,11 @@ fn cmd_client() {
             SelectServer(next_state) => {
                 println!("Select a server:");
                 for (i, server) in servers.iter().enumerate() {
-                    println!("{:3} {}", i + 1, server.0);
+                    if let Some(conn) = &server.1 {
+                        println!("{:3} {} ({})", i + 1, server.0, conn.username);
+                    } else {
+                        println!("{:3} {}", i + 1, server.0);
+                    }
                 }
                 print!("> ");
                 stdout().flush().unwrap();
