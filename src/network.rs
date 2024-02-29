@@ -1,5 +1,6 @@
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
+use serde_json::Value;
 use crate::crypto::{PublicKeyPair, VerifyKeyPair};
 use ed25519_dalek::Signature;
 
@@ -12,7 +13,7 @@ pub struct RegisterData {
 
 #[derive(Serialize, Deserialize)]
 pub struct PutData {
-    pub data: String,
+    pub data: Value,
     pub signature: Signature,
 }
 
@@ -22,6 +23,7 @@ pub struct MessageData {
     pub message: String,
 }
 
+//TODO: This is way too small
 pub type UID = u64;
 
 #[derive(Serialize, Deserialize)]

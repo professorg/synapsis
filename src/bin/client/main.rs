@@ -47,7 +47,7 @@ impl Connection {
             username: username.to_string(),
             pkp: pub_keypair,
             pkv: ver_keypair,
-            sk: sk,
+            sk,
         })
     }
 }
@@ -73,11 +73,11 @@ impl<'a> Messages<'a> {
         let sent = get_sent_message_head(&conn, with.clone());
         let recv = get_recv_message_head(&conn, with.clone());
         Messages {
-            conn: conn,
-            with: with,
-            sent: sent,
-            recv: recv,
-            until: until,
+            conn,
+            with,
+            sent,
+            recv,
+            until,
         }
     }
 }
@@ -212,20 +212,21 @@ fn send_chat_message(conn: &mut Connection, data: &MessageData) -> Result<reqwes
     let uid: UID = OsRng.next_u64();
     let timestamp = (SystemTime::now().duration_since(UNIX_EPOCH)).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
     let message = Message {
-            message: message,
-            message_cc: message_cc,
-            timestamp: timestamp,
+            message,
+            message_cc,
+            timestamp,
             prev: head,
-            uid: uid,
+            uid,
         };
     let message = serde_json::to_string(&message)
         .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let signature = sign(&message.as_bytes()[..], &conn.pkv)
+    let message_val = serde_json::json!(message);
+    let signature = sign(&message_val.to_string().as_bytes()[..], &conn.pkv)
         .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let msg_data = PutData {
-        data: message,
-        signature: signature,
+        data: serde_json::json!(message),
+        signature,
     };
     put_data(&format!("{}/{}/{}/{}", &conn.address, conn.username, data.to, uid)[..], &conn.client, msg_data)
         .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
@@ -236,13 +237,12 @@ fn send_chat_message(conn: &mut Connection, data: &MessageData) -> Result<reqwes
                 Err(res.status())
             })?;
 
-    let uid_ser = serde_json::to_string(&uid)
-        .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let signature = sign(&uid_ser.as_bytes()[..], &conn.pkv)
+    let uid_val = serde_json::json!(&uid);
+    let signature = sign(&uid_val.to_string().as_bytes()[..], &conn.pkv)
         .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
     let uid_data = PutData {
-        data: uid_ser,
-        signature: signature,
+        data: uid_val,
+        signature,
     };
     put_data(&format!("{}/{}/{}/head", &conn.address[..], conn.username, data.to)[..], &conn.client, uid_data)
         .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
@@ -604,7 +604,7 @@ fn cmd_client() {
                     if !input.is_empty() {
                         let to = servers[i].2[j].clone();
                         let res = send_chat_message(&mut servers[i].1.as_mut().unwrap(), &MessageData {
-                            to: to,
+                            to,
                             message: input.clone(),
                         });
                         if res.is_err() {

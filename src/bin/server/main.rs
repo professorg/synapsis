@@ -18,8 +18,10 @@ use synapsis::{
     crypto::{VerifyKeyPair, vrfy},
     network::{RegisterData, PutData},
 };
+use serde_json::Value;
 
-type StorageInner = HashMap<String, Arc<RwLock<HashMap<String, String>>>>;
+type Username = String;
+type StorageInner = HashMap<Username, Arc<RwLock<HashMap<String, Value>>>>;
 type Storage = Arc<RwLock<StorageInner>>;
 
 
@@ -36,7 +38,7 @@ fn make_user(storage: &Storage, user: String) -> Result<Status, Status> {
     }
 }
 
-fn put_data(storage: &Storage, user: String, path: String, data: String) -> Result<Status, Status> {
+fn put_data(storage: &Storage, user: String, path: String, data: Value) -> Result<Status, Status> {
     if let Ok(storage) = storage.read() {
         if let Some(inner) = storage.get(&user) {
             if let Ok(mut inner) = inner.write() {
@@ -53,7 +55,7 @@ fn put_data(storage: &Storage, user: String, path: String, data: String) -> Resu
     }
 }
 
-fn get_data(storage: &Storage, user: String, path: String) -> Result<String, Status> {
+fn get_data(storage: &Storage, user: String, path: String) -> Result<Value, Status> {
     if let Ok(storage) = storage.read() {
         if let Some(inner) = storage.get(&user) {
             if let Ok(inner) = inner.read() {
@@ -76,16 +78,17 @@ fn get_data(storage: &Storage, user: String, path: String) -> Result<String, Sta
 #[get("/<user>/<path..>")]
 fn get(storage: State<Storage>, user: String, path: PathBuf) -> Result<String, Status> {
     let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
-    get_data(storage.inner(), user, path)
+    let res = get_data(storage.inner(), user, path);
+    res.map(|x| serde_json::value::Value::to_string(&x))
 }
 
 #[put("/<user>/<path..>", format = "application/json", data = "<data>")]
 fn put(storage: State<Storage>, user: String, path: PathBuf, data: Json<PutData>) -> Result<Status, Status> {
     let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
     let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
-    let pk: VerifyKeyPair = serde_json::from_str(&pk[..])
+    let pk: VerifyKeyPair = serde_json::from_value(pk)
         .map_err(|_| Status::InternalServerError)?;
-    if vrfy(&data.data.as_bytes(), data.signature, &pk) {
+    if vrfy(data.data.to_string().as_bytes(), data.signature, &pk) {
         put_data(storage.inner(), user.clone(), path, data.data.clone())
     } else {
         Err(Status::Unauthorized)
@@ -95,9 +98,9 @@ fn put(storage: State<Storage>, user: String, path: PathBuf, data: Json<PutData>
 #[post("/register", format = "application/json", data = "<data>")]
 fn register(storage: State<Storage>, data: Json<RegisterData>) -> Result<Status, Status> {
     let storage = storage.inner();
-    let pkp = serde_json::ser::to_string(&data.pkp)
+    let pkp = serde_json::value::to_value(&data.pkp)
         .map_err(|_| Status::InternalServerError)?;
-    let pkv = serde_json::ser::to_string(&data.pkv)
+    let pkv = serde_json::value::to_value(&data.pkv)
         .map_err(|_| Status::InternalServerError)?;
     make_user(storage, data.username.clone())
         .and(put_data(storage, data.username.clone(), "pkp".to_string(), pkp))
@@ -168,7 +171,7 @@ mod test {
         let path = "some/path";
         let data = "some_data";
         assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
-        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), data.to_string()), Ok(Status::Ok));
+        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), serde_json::json!(data)), Ok(Status::Ok));
         assert_eq!(
             *storage
                 .read().unwrap()
@@ -187,7 +190,7 @@ mod test {
         let data = "some_data";
         // Do not create the account
         // assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
-        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), data.to_string()), Err(Status::NotFound));
+        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), serde_json::json!(data)), Err(Status::NotFound));
     }
 
     #[test]
@@ -197,7 +200,7 @@ mod test {
         let path = "some/path";
         let data = "some_data";
         assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
-        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), data.to_string()), Ok(Status::Ok));
+        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), serde_json::json!(data)), Ok(Status::Ok));
         assert_eq!(get_data(&storage, username.to_string(), path.to_string()).unwrap(), data.to_string());
     }
 
