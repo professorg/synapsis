@@ -24,7 +24,6 @@ type Username = String;
 type StorageInner = HashMap<Username, Arc<RwLock<HashMap<String, Value>>>>;
 type Storage = Arc<RwLock<StorageInner>>;
 
-
 fn make_user(storage: &Storage, user: String) -> Result<Status, Status> {
     if let Ok(mut storage) = storage.write() {
         if storage.contains_key(&user) {
@@ -79,7 +78,10 @@ fn get_data(storage: &Storage, user: String, path: String) -> Result<Value, Stat
 fn get(storage: State<Storage>, user: String, path: PathBuf) -> Result<String, Status> {
     let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
     let res = get_data(storage.inner(), user, path);
-    res.map(|x| serde_json::value::Value::to_string(&x))
+    res
+      .and_then(|x|
+        serde_json::ser::to_string(&x)
+          .map_err(|_| Status::InternalServerError))
 }
 
 #[put("/<user>/<path..>", format = "application/json", data = "<data>")]
@@ -88,7 +90,8 @@ fn put(storage: State<Storage>, user: String, path: PathBuf, data: Json<PutData>
     let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
     let pk: VerifyKeyPair = serde_json::from_value(pk)
         .map_err(|_| Status::InternalServerError)?;
-    if vrfy(data.data.to_string().as_bytes(), data.signature, &pk) {
+    let data_str = serde_json::ser::to_string(&data.data).map_err(|_| Status::InternalServerError)?;
+    if vrfy(data_str.as_bytes(), data.signature, &pk) {
         put_data(storage.inner(), user.clone(), path, data.data.clone())
     } else {
         Err(Status::Unauthorized)
@@ -111,8 +114,9 @@ fn rocket() -> rocket::Rocket {
     let storage = storage();
     let ctrlc_storage = storage.clone();
 
+    //TODO: impl Drop for the storage
     ctrlc::set_handler(move || {
-        fs::write("database.json", serde_json::to_string(&ctrlc_storage).unwrap()).unwrap();
+        fs::write("database.json", serde_json::ser::to_string(&ctrlc_storage).unwrap()).unwrap();
         process::exit(0);
     }).expect("Error setting Ctrl-C handler");
 

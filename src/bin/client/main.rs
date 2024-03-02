@@ -145,18 +145,28 @@ fn get_sent_message(conn: &Connection, to: String, uid: UID) -> Option<MessageDe
 
 fn get_sent_message_head(conn: &Connection, to: String) -> Option<MessageDe> {
     let data = get_data(&format!("{}/{}/{}/head", conn.address, conn.username.clone(), to)[..], &conn.client).ok()?.text().ok()?;
-    let head: Option<UID> = serde_json::from_str(&data[..]).ok()?;
+    let head = serde_json::from_str(&data[..]);
+    println!("get_sent_message_head: {:#?}", head);
+    let head: Option<UID> = head.ok()?;
     let head: UID = head?;
     get_sent_message(conn, to, head)
 }
 
 fn get_recv_message(conn: &Connection, from: String, uid: UID) -> Option<MessageDe> {
-    let message = get_data(&format!("{}/{}/{}/{}", conn.address, from, conn.username.clone(), uid)[..], &conn.client).ok()?.text().ok()?;
+    let message = get_data(&format!("{}/{}/{}/{}", conn.address, from, conn.username.clone(), uid)[..], &conn.client);
+    println!("get_recv_message: {:#?}", message);
+    let message = message.ok()?.text().ok()?;
+    println!("get_recv_message (ok): {:#?}", message);
     let message_de: Message = serde_json::from_str(&message[..]).ok()?;
-    let message = dec_pub(&message_de.message[..], &conn.pkp).ok()?;
+    let message = dec_pub(&message_de.message[..], &conn.pkp);
+    println!("get_recv_message (dec): {:#?}", message);
+    let message = message.ok()?;
+    let message = String::from_utf8(message);
+    println!("get_recv_message (from_utf8): {:#?}", message);
+    let message = message.ok()?;
     Some(MessageDe {
         from: from.clone(),
-        message: String::from_utf8(message).ok()?,
+        message,
         timestamp: message_de.timestamp,
         prev: message_de.prev,
         uid: message_de.uid
@@ -165,7 +175,9 @@ fn get_recv_message(conn: &Connection, from: String, uid: UID) -> Option<Message
 
 fn get_recv_message_head(conn: &Connection, from: String) -> Option<MessageDe> {
     let data = get_data(&format!("{}/{}/{}/head", conn.address, from, conn.username.clone())[..], &conn.client).ok()?.text().ok()?;
-    let head: Option<UID> = serde_json::from_str(&data[..]).ok()?;
+    let head = serde_json::from_str(&data[..]);
+    println!("get_recv_message_head: {:#?}", head);
+    let head: Option<UID> = head.ok()?;
     let head: UID = head?;
     get_recv_message(conn, from, head)
 }
@@ -218,14 +230,15 @@ fn send_chat_message(conn: &mut Connection, data: &MessageData) -> Result<reqwes
             prev: head,
             uid,
         };
-    let message = serde_json::to_string(&message)
-        .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+    //let message = serde_json::to_string(&message)
+    //    .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
     let message_val = serde_json::json!(message);
-    let signature = sign(&message_val.to_string().as_bytes()[..], &conn.pkv)
+    let message_str = serde_json::ser::to_string(&message_val).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let signature = sign(&message_str.as_bytes()[..], &conn.pkv)
         .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let msg_data = PutData {
-        data: serde_json::json!(message),
+        data: message_val,
         signature,
     };
     put_data(&format!("{}/{}/{}/{}", &conn.address, conn.username, data.to, uid)[..], &conn.client, msg_data)
@@ -237,8 +250,9 @@ fn send_chat_message(conn: &mut Connection, data: &MessageData) -> Result<reqwes
                 Err(res.status())
             })?;
 
-    let uid_val = serde_json::json!(&uid);
-    let signature = sign(&uid_val.to_string().as_bytes()[..], &conn.pkv)
+    let uid_val = serde_json::json!(uid);
+    let uid_str = serde_json::ser::to_string(&uid_val).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let signature = sign(&uid_str.as_bytes()[..], &conn.pkv)
         .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
     let uid_data = PutData {
         data: uid_val,
