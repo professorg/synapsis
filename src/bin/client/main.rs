@@ -146,7 +146,7 @@ fn get_sent_message(conn: &Connection, to: String, uid: UID) -> Option<MessageDe
 fn get_sent_message_head(conn: &Connection, to: String) -> Option<MessageDe> {
     let data = get_data(&format!("{}/{}/{}/head", conn.address, conn.username.clone(), to)[..], &conn.client).ok()?.text().ok()?;
     let head = serde_json::from_str(&data[..]);
-    println!("get_sent_message_head: {:#?}", head);
+    //println!("get_sent_message_head: {:#?}", head);
     let head: Option<UID> = head.ok()?;
     let head: UID = head?;
     get_sent_message(conn, to, head)
@@ -154,15 +154,15 @@ fn get_sent_message_head(conn: &Connection, to: String) -> Option<MessageDe> {
 
 fn get_recv_message(conn: &Connection, from: String, uid: UID) -> Option<MessageDe> {
     let message = get_data(&format!("{}/{}/{}/{}", conn.address, from, conn.username.clone(), uid)[..], &conn.client);
-    println!("get_recv_message: {:#?}", message);
+    //println!("get_recv_message: {:#?}", message);
     let message = message.ok()?.text().ok()?;
-    println!("get_recv_message (ok): {:#?}", message);
+    //println!("get_recv_message (ok): {:#?}", message);
     let message_de: Message = serde_json::from_str(&message[..]).ok()?;
     let message = dec_pub(&message_de.message[..], &conn.pkp);
-    println!("get_recv_message (dec): {:#?}", message);
+    //println!("get_recv_message (dec): {:#?}", message);
     let message = message.ok()?;
     let message = String::from_utf8(message);
-    println!("get_recv_message (from_utf8): {:#?}", message);
+    //println!("get_recv_message (from_utf8): {:#?}", message);
     let message = message.ok()?;
     Some(MessageDe {
         from: from.clone(),
@@ -176,7 +176,7 @@ fn get_recv_message(conn: &Connection, from: String, uid: UID) -> Option<Message
 fn get_recv_message_head(conn: &Connection, from: String) -> Option<MessageDe> {
     let data = get_data(&format!("{}/{}/{}/head", conn.address, from, conn.username.clone())[..], &conn.client).ok()?.text().ok()?;
     let head = serde_json::from_str(&data[..]);
-    println!("get_recv_message_head: {:#?}", head);
+    //println!("get_recv_message_head: {:#?}", head);
     let head: Option<UID> = head.ok()?;
     let head: UID = head?;
     get_recv_message(conn, from, head)
