@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use synapsis::{
     network::{RegisterData, PutData, MessageData, Message, UID},
     crypto::{
@@ -268,6 +269,33 @@ fn send_chat_message(conn: &mut Connection, data: &MessageData) -> Result<reqwes
             })
 }
 
+
+fn get_friends(conn: &Connection) -> Option<Vec<String>> {
+  let response = get_data(&format!("{}/{}/friends", &conn.address[..], conn.username), &conn.client);
+  let txt = response.ok()?.text().ok()?;
+  let friends = serde_json::from_str(&txt[..]).ok()?;
+  friends
+}
+
+fn put_friends(conn: &Connection, friends: Vec<String>) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
+  let friends_val = serde_json::json!(&friends);
+  let friends_str = serde_json::ser::to_string(&friends_val).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+  let signature = sign(&friends_str[..].as_bytes()[..], &conn.pkv)
+        .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+  let data = PutData {
+    data: friends_val,
+    signature,
+  };
+  put_data(&format!("{}/{}/friends", &conn.address[..], conn.username), &conn.client, data)
+    .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+    .and_then(|res|
+        if res.status().is_success() {
+            Ok(res.status())
+        } else {
+            Err(res.status())
+        })
+}
+
 fn register_keys(address: &str, client: &Client, data: RegisterData) -> reqwest::Result<Response> {
     client.post(address)
         .json(&data)
@@ -298,6 +326,8 @@ enum ReadState {
     AddFriend(usize),
     SelectFriend(usize, AfterSelectFriend),
     RemoveFriend(usize, usize),
+    GetFriends(usize),
+    DownloadChats(usize),
     Chat(usize, usize, Option<UID>),
 }
 
@@ -521,8 +551,10 @@ fn cmd_client() {
                 ServerList
             }
             FriendList(i) => {
+                println!("get: Get friends list from server");
                 println!("add: Add friend");
                 println!("remove: Remove friend");
+                println!("download: Download all chats from added friends");
                 println!("open: Open chat");
                 println!("exit: Exit to server list");
                 println!("quit: Quit Synapsis");
@@ -532,8 +564,10 @@ fn cmd_client() {
                 input.pop();
                 let mut args = input.split_whitespace();
                 match args.next() {
+                    Some("get") => GetFriends(i),
                     Some("add") => AddFriend(i),
                     Some("remove") => SelectFriend(i, AfterSelectFriend::Remove),
+                    Some("download") => DownloadChats(i),
                     Some("open") => SelectFriend(i, AfterSelectFriend::Open),
                     Some("exit") => ServerList,
                     Some("quit") => break,
@@ -545,7 +579,16 @@ fn cmd_client() {
                 stdout().flush().unwrap();
                 stdin().read_line(&mut input).unwrap();
                 input.pop();
-                servers[i].2.push(input.clone());
+                let friend = input.clone();
+                servers[i].2.push(friend.clone());
+                let conn = servers[i].1.as_ref().unwrap();
+                let mut friends = get_friends(conn).unwrap_or(vec![]);
+                if !friends.contains(&friend) {
+                  friends.push(friend.clone());
+                  if put_friends(conn, friends).is_err() {
+                    println!("Failed to update friends list on server")
+                  }
+                }
                 FriendList(i)
             }
             SelectFriend(i, next_state) => {
@@ -603,6 +646,13 @@ fn cmd_client() {
                 };
                 FriendList(i)
             }
+            GetFriends(i) => {
+              let conn = servers[i].1.as_ref().unwrap();
+              let friends = get_friends(conn).unwrap_or(vec![]);
+              servers[i].2.clear();
+              servers[i].2.extend(friends);
+              FriendList(i)
+            }
             Chat(i, j, until) => {
                 let mut last: Option<UID> = until;
                 print!("> ");
@@ -632,6 +682,47 @@ fn cmd_client() {
                     }
                     Chat(i, j, last)
                 }
+            }
+            DownloadChats(i) => {
+              print!("Filename: ");
+              stdout().flush().unwrap();
+              stdin().read_line(&mut input).unwrap();
+              input.pop();
+              let conn = servers[i].1.as_ref();
+              let file = input.clone();
+              let friends = servers[i].2.iter();
+              let friends_messages =
+                friends
+                  .map(|friend| (friend.clone(), Messages::new(&conn.unwrap(), friend.clone(), None)));
+              let chats = 
+                friends_messages
+                  .map(|(friend, messages)|
+                    (
+                      friend,
+                      messages
+                        .map(|msg| (msg.from, msg.message))
+                    )
+                  );
+              let chats =
+                chats
+                  .map(|(friend, messages)|
+                    (
+                      friend,
+                      messages
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                      )
+                  );
+              let chats =
+                chats
+                  .collect::<HashMap<_,_>>();
+              if fs::write(file, serde_json::ser::to_string(&chats).unwrap()).is_err() {
+                  println!("Failed to download chats from server.")
+              }
+              
+              FriendList(i)
             }
         };
     }
