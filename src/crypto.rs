@@ -262,7 +262,7 @@ pub fn gen_ver(username: &str, password: &str) -> VerifyKeyPair {
 }
 */
 
-pub fn enc_prv(message: &[u8], key: &mut PrivateKey) -> (Vec<u8>, Vec<u8>) {
+pub fn enc_prv(message: &[u8], key: &PrivateKey) -> (Vec<u8>, Vec<u8>) {
     let mut output: Vec<u8> = repeat(0u8).take(message.len()).collect();
     let mut nonce: Vec<u8> = repeat(0u8).take(16).collect();
     OsRng.fill_bytes(&mut nonce[..]);
