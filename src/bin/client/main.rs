@@ -183,7 +183,19 @@ fn get_recv_message_head(conn: &Connection, from: String) -> Option<MessageDe> {
     get_recv_message(conn, from, head)
 }
 
-fn send_chat_message(conn: &mut Connection, data: &MessageData) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
+fn get_pkp(conn: &Connection, to: &String) -> Option<PublicKeyPair> {
+  let pkp =
+    get_data(&format!("{}/{}/pkp", &conn.address[..], to.clone())[..], &conn.client) 
+      .ok()
+      .filter(|res| res.status().is_success())
+      .and_then(|res| res.text().ok())
+      .and_then(|pkp|
+        serde_json::from_str::<PublicKeyPair>(&pkp[..])
+          .ok());
+  pkp
+}
+
+fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
     let head = get_data(&format!("{}/{}/{}/head", &conn.address[..], conn.username, data.to)[..], &conn.client)
         .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
         .and_then(|res|
@@ -208,20 +220,11 @@ fn send_chat_message(conn: &mut Connection, data: &MessageData) -> Result<reqwes
     };
 
     //TODO: cache this
-    let pkp = get_data(&format!("{}/{}/pkp", &conn.address[..], data.to)[..], &conn.client) 
-        .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
-        .and_then(|res|
-            if res.status().is_success() {
-                Ok(res.text())
-            } else {
-                Err(res.status())
-            })
-        .and_then(|res| res.map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR))
-        .and_then(|pkp|
-            serde_json::from_str::<PublicKeyPair>(&pkp[..])
-                .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR))?;
+    let pkp =
+      get_pkp(conn, &data.to)
+        .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
     let message = enc_pub(data.message.as_bytes(), &pkp);
-    let message_cc = enc_prv(data.message.as_bytes(), &mut conn.sk);
+    let message_cc = enc_prv(data.message.as_bytes(), &conn.sk);
     let uid: UID = OsRng.next_u64();
     let timestamp = (SystemTime::now().duration_since(UNIX_EPOCH)).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
     let message = Message {
@@ -267,6 +270,41 @@ fn send_chat_message(conn: &mut Connection, data: &MessageData) -> Result<reqwes
             } else {
                 Err(res.status())
             })
+}
+
+fn redact_chat_message(conn: &Connection, to: &String, uid: u64) -> Result<(), String> {
+  let message_orig: MessageDe = get_sent_message(conn, to.clone(), uid).ok_or("Not found")?;
+  let message_redacted = MessageDe {
+    message: "[deleted message]".to_string(),
+    ..message_orig
+  };
+  let pkp =
+    get_pkp(conn, to)
+      .ok_or("Failed to get public key")?;
+  let message = enc_pub(message_redacted.message.as_bytes(), &pkp);
+  let message_cc = enc_prv(message_redacted.message.as_bytes(), &conn.sk);
+  let uid: UID = message_redacted.uid;
+  let timestamp = message_redacted.timestamp;
+  let prev = message_redacted.prev;
+  let message = Message {
+          message,
+          message_cc,
+          timestamp,
+          prev,
+          uid,
+      };
+  let message_val = serde_json::json!(message);
+  let message_str = serde_json::ser::to_string(&message_val).map_err(|_| "Failed to serialize message")?;
+  let signature = sign(&message_str.as_bytes()[..], &conn.pkv)
+      .ok_or("Failed to sign message")?;
+
+  let msg_data = PutData {
+      data: message_val,
+      signature,
+  };
+  put_data(&format!("{}/{}/{}/{}", &conn.address, conn.username, to, uid)[..], &conn.client, msg_data)
+    .map_err(|_| "Failed to update redacted message")?;
+  Ok(())
 }
 
 
@@ -328,6 +366,7 @@ enum ReadState {
     RemoveFriend(usize, usize),
     GetFriends(usize),
     DownloadChats(usize),
+    DeleteChat(usize, usize),
     Chat(usize, usize, Option<UID>),
 }
 
@@ -345,6 +384,7 @@ enum AfterSelectServer {
 enum AfterSelectFriend {
     Remove,
     Open,
+    Delete,
 }
 
 fn cmd_client() {
@@ -555,6 +595,7 @@ fn cmd_client() {
                 println!("add: Add friend");
                 println!("remove: Remove friend");
                 println!("download: Download all chats from added friends");
+                println!("delete: Delete chat with friend");
                 println!("open: Open chat");
                 println!("exit: Exit to server list");
                 println!("quit: Quit Synapsis");
@@ -568,6 +609,7 @@ fn cmd_client() {
                     Some("add") => AddFriend(i),
                     Some("remove") => SelectFriend(i, AfterSelectFriend::Remove),
                     Some("download") => DownloadChats(i),
+                    Some("delete") => SelectFriend(i, AfterSelectFriend::Delete),
                     Some("open") => SelectFriend(i, AfterSelectFriend::Open),
                     Some("exit") => ServerList,
                     Some("quit") => break,
@@ -629,6 +671,7 @@ fn cmd_client() {
                         println!("All other inputs are sent as messages.");
                         Chat(i, j - 1, None)
                     },
+                    (Some(j), AfterSelectFriend::Delete) => DeleteChat(i, j - 1),
                     (None, _) => FriendList(i)
                 }
             }
@@ -652,36 +695,6 @@ fn cmd_client() {
               servers[i].2.clear();
               servers[i].2.extend(friends);
               FriendList(i)
-            }
-            Chat(i, j, until) => {
-                let mut last: Option<UID> = until;
-                print!("> ");
-                stdout().flush().unwrap();
-                input.clear();
-                stdin().read_line(&mut input).unwrap();
-                input.pop();
-                if input.eq_ignore_ascii_case("/exit") {
-                    FriendList(i)
-                } else if input.eq_ignore_ascii_case("/quit") {
-                    break;
-                } else {
-                    if !input.is_empty() {
-                        let to = servers[i].2[j].clone();
-                        let res = send_chat_message(&mut servers[i].1.as_mut().unwrap(), &MessageData {
-                            to,
-                            message: input.clone(),
-                        });
-                        if res.is_err() {
-                            println!("Failed to send message. User not found.");
-                        }
-                    }
-                    let messages = Messages::new(&servers[i].1.as_ref().unwrap(), servers[i].2[j].clone(), until);
-                    for msg in messages.collect::<Vec<_>>().iter().rev() {
-                        last = Some(msg.uid);
-                        println!("{}: {}", msg.from, msg.message);
-                    }
-                    Chat(i, j, last)
-                }
             }
             DownloadChats(i) => {
               print!("Filename: ");
@@ -723,6 +736,53 @@ fn cmd_client() {
               }
               
               FriendList(i)
+            }
+            DeleteChat(i, j) => {
+              let conn = servers[i].1.as_ref().unwrap();
+              let friends = &servers[i].2;
+              let friend = &friends[j];
+              //TODO: Use separate iterator for only sent messages
+              let messages = Messages::new(&conn, friend.clone(), None); 
+              for message in messages {
+                if message.from == conn.username {
+                  let uid = message.uid;
+                  let res = redact_chat_message(conn, friend, uid);
+                  if let Err(msg) = res {
+                    println!("Error while deleting message: {}", msg);
+                  }
+                }
+              }
+              FriendList(i) 
+            }
+            Chat(i, j, until) => {
+                let mut last: Option<UID> = until;
+                print!("> ");
+                stdout().flush().unwrap();
+                input.clear();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                if input.eq_ignore_ascii_case("/exit") {
+                    FriendList(i)
+                } else if input.eq_ignore_ascii_case("/quit") {
+                    break;
+                } else {
+                    if !input.is_empty() {
+                        let to = servers[i].2[j].clone();
+                        let res = send_chat_message(&mut servers[i].1.as_mut().unwrap(), &MessageData {
+                            to,
+                            message: input.clone(),
+                        });
+                        if res.is_err() {
+                            println!("Failed to send message. User not found.");
+                        }
+                    }
+                    let messages = Messages::new(&servers[i].1.as_ref().unwrap(), servers[i].2[j].clone(), until);
+                    for msg in messages.collect::<Vec<_>>().iter().rev() {
+                        last = Some(msg.uid);
+                        println!("{}: {}", msg.from, msg.message);
+                    }
+                    Chat(i, j, last)
+                }
             }
         };
     }
