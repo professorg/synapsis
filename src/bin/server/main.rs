@@ -9,14 +9,15 @@ use std::{
     process,
     fs,
 };
+use ed25519_dalek::Signature;
 use rocket::{
     http::Status,
     State,
 };
 use rocket_contrib::json::Json;
 use synapsis::{
-    crypto::{VerifyKeyPair, vrfy},
-    network::{RegisterData, PutData},
+    crypto::{vrfy, VerifyKeyPair},
+    network::{PutData, RegisterData, UserVerification},
 };
 use serde_json::Value;
 
@@ -35,6 +36,32 @@ fn make_user(storage: &Storage, user: String) -> Result<Status, Status> {
     } else {
         Err(Status::InternalServerError)
     }
+}
+
+fn delete_user(storage: &Storage, user: String) -> Result<Status, Status> {
+  if let Ok(mut storage) = storage.write() {
+    storage.remove(&user);
+    Ok(Status::Ok)
+  } else {
+    Err(Status::InternalServerError)
+  }
+}
+
+fn delete_data(storage: &Storage, user: String, path: String) -> Result<Status, Status> {
+  if let Ok(storage) = storage.read() {
+    if let Some(inner) = storage.get(&user) {
+      if let Ok(mut inner) = inner.write() {
+        inner.remove(&path);
+        Ok(Status::Ok)
+      } else {
+        Err(Status::InternalServerError)
+      }
+    } else {
+      Err(Status::NotFound)
+    }
+  } else {
+    Err(Status::InternalServerError)
+  }
 }
 
 fn put_data(storage: &Storage, user: String, path: String, data: Value) -> Result<Status, Status> {
@@ -98,6 +125,38 @@ fn put(storage: State<Storage>, user: String, path: PathBuf, data: Json<PutData>
     }
 }
 
+#[delete("/<user>", format = "application/json", data = "<data>")]
+fn delete(storage: State<Storage>, user: String, data: Json<UserVerification>) -> Result<Status, Status> {
+  let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
+  let pk: VerifyKeyPair = serde_json::from_value(pk)
+    .map_err(|_| Status::InternalServerError)?;
+  let nonce = &data.nonce;
+  let nonce_str =
+    serde_json::ser::to_string(&nonce)
+    .map_err(|_| Status::InternalServerError)?;
+  let nonce_bytes = nonce_str.as_bytes();
+  let signature = data.signature;
+  if vrfy(&nonce_bytes, signature, &pk) {
+    delete_user(&storage, user)
+  } else {
+    Err(Status::Unauthorized)
+  }
+}
+
+#[delete("/<user>/<path..>", format = "application/json", data = "<signature>")]
+fn delete_path(storage: State<Storage>, user: String, path: PathBuf, signature: Json<Signature>) -> Result<Status, Status> {
+  let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
+  let pk: VerifyKeyPair = serde_json::from_value(pk)
+    .map_err(|_| Status::InternalServerError)?;
+  let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
+  let path_bytes = path.as_bytes();
+  if vrfy(&path_bytes, signature.0, &pk) {
+    delete_data(&storage, user, path)
+  } else {
+    Err(Status::Unauthorized)
+  }
+}
+
 #[post("/register", format = "application/json", data = "<data>")]
 fn register(storage: State<Storage>, data: Json<RegisterData>) -> Result<Status, Status> {
     let storage = storage.inner();
@@ -121,7 +180,7 @@ fn rocket() -> rocket::Rocket {
     }).expect("Error setting Ctrl-C handler");
 
     rocket::ignite()
-        .mount("/", routes![register, get, put])
+        .mount("/", routes![register, get, put, delete, delete_path])
         .manage(storage)
 }
 

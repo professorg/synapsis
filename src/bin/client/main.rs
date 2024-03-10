@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 use synapsis::{
-    network::{RegisterData, PutData, MessageData, Message, UID},
     crypto::{
-        gen_pub, enc_pub, dec_pub, PublicKeyPair,
-        gen_ver, sign, VerifyKeyPair,
-        gen_prv, enc_prv, dec_prv, PrivateKey,
-    },
+        dec_prv, dec_pub, enc_prv, enc_pub, gen_prv, gen_pub, gen_ver, sign, PrivateKey, PublicKeyPair, VerifyKeyPair
+    }, network::{Message, MessageData, PutData, RegisterData, UserVerification, UID}
 };
 use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use reqwest::blocking::{Client, Response};
@@ -340,6 +337,30 @@ fn register_keys(address: &str, client: &Client, data: RegisterData) -> reqwest:
         .send()
 }
 
+fn delete_user(conn: &Connection) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
+  let user = conn.username.clone();
+  let reg_data = RegisterData {
+      username: user.clone(),
+      pkp: conn.pkp.pubkey(),
+      pkv: conn.pkv.pubkey(),
+  };
+  let reg_data_str = serde_json::ser::to_string(&reg_data).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+  let signature = sign(&reg_data_str[..].as_bytes()[..], &conn.pkv)
+    .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+  let verif = UserVerification {
+    nonce: reg_data,
+    signature,
+  };
+  delete_data(&format!("{}/{}", &conn.address[..], user.clone()), &conn.client, verif)
+    .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+    .and_then(|res|
+        if res.status().is_success() {
+            Ok(res.status())
+        } else {
+            Err(res.status())
+        })
+}
+
 fn put_data(address: &str, client: &Client, data: PutData) -> reqwest::Result<Response> {
     client.put(address)
         .json(&data)
@@ -348,6 +369,12 @@ fn put_data(address: &str, client: &Client, data: PutData) -> reqwest::Result<Re
 
 fn get_data(address: &str, client: &Client) -> reqwest::Result<Response> {
     client.get(address)
+        .send()
+}
+
+fn delete_data(address: &str, client: &Client, data: UserVerification) -> reqwest::Result<Response> {
+    client.delete(address)
+        .json(&data)
         .send()
 }
 
@@ -367,6 +394,7 @@ enum ReadState {
     GetFriends(usize),
     DownloadChats(usize),
     DeleteChat(usize, usize),
+    DeleteAccount(usize),
     Chat(usize, usize, Option<UID>),
 }
 
@@ -596,6 +624,7 @@ fn cmd_client() {
                 println!("remove: Remove friend");
                 println!("download: Download all chats from added friends");
                 println!("delete: Delete chat with friend");
+                println!("delete_account: Delete entire account");
                 println!("open: Open chat");
                 println!("exit: Exit to server list");
                 println!("quit: Quit Synapsis");
@@ -610,6 +639,7 @@ fn cmd_client() {
                     Some("remove") => SelectFriend(i, AfterSelectFriend::Remove),
                     Some("download") => DownloadChats(i),
                     Some("delete") => SelectFriend(i, AfterSelectFriend::Delete),
+                    Some("delete_account") => DeleteAccount(i),
                     Some("open") => SelectFriend(i, AfterSelectFriend::Open),
                     Some("exit") => ServerList,
                     Some("quit") => break,
@@ -753,6 +783,14 @@ fn cmd_client() {
                 }
               }
               FriendList(i) 
+            }
+            DeleteAccount(i) => {
+              let conn = servers[i].1.as_ref().unwrap();
+              let res = delete_user(conn);
+              if let Err(msg) = res {
+                println!("Error while deleting your account: {}", msg);
+              }
+              ServerList
             }
             Chat(i, j, until) => {
                 let mut last: Option<UID> = until;

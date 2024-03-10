@@ -18,6 +18,12 @@ pub struct PutData {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct UserVerification {
+    pub nonce: RegisterData,
+    pub signature: Signature,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct MessageData {
     pub to: String,
     pub message: String,
