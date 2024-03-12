@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use ed25519_dalek::Signature;
 use synapsis::{
     crypto::{
         dec_prv, dec_pub, enc_prv, enc_pub, gen_prv, gen_pub, gen_ver, sign, PrivateKey, PublicKeyPair, VerifyKeyPair
@@ -304,6 +305,15 @@ fn redact_chat_message(conn: &Connection, to: &String, uid: u64) -> Result<(), S
   Ok(())
 }
 
+fn delete_chat_message_simple(conn: &Connection, to: &String, uid: u64) -> Result<(), String> {
+  let path = format!("{}/{}", to, uid);
+  let sig =
+    sign(path.as_bytes(), &conn.pkv)
+      .ok_or("Failed to sign path")?;
+  delete_path(&format!("{}/{}/{}", &conn.address[..], &conn.username[..], &path[..])[..], &conn.client, sig)
+    .map_err(|_| "Failed to delete data")?;
+  Ok(())
+}
 
 fn get_friends(conn: &Connection) -> Option<Vec<String>> {
   let response = get_data(&format!("{}/{}/friends", &conn.address[..], conn.username), &conn.client);
@@ -361,6 +371,19 @@ fn delete_user(conn: &Connection) -> Result<reqwest::StatusCode, reqwest::Status
         })
 }
 
+fn delete_chat(conn: &Connection, with: String) -> Result<(), String> {
+  let messages = Messages::new(conn, with.clone(), None);
+  let res = messages
+    .map(|m| m.uid)
+    .map(|uid| delete_chat_message_simple(conn, &with.clone(), uid))
+    .reduce(|acc, e| acc.and(e));
+  match res {
+    None => Ok(()),
+    Some(res) => res,
+  }
+    
+}
+
 fn put_data(address: &str, client: &Client, data: PutData) -> reqwest::Result<Response> {
     client.put(address)
         .json(&data)
@@ -373,6 +396,12 @@ fn get_data(address: &str, client: &Client) -> reqwest::Result<Response> {
 }
 
 fn delete_data(address: &str, client: &Client, data: UserVerification) -> reqwest::Result<Response> {
+    client.delete(address)
+        .json(&data)
+        .send()
+}
+
+fn delete_path(address: &str, client: &Client, data: Signature) -> reqwest::Result<Response> {
     client.delete(address)
         .json(&data)
         .send()
@@ -393,6 +422,7 @@ enum ReadState {
     RemoveFriend(usize, usize),
     GetFriends(usize),
     DownloadChats(usize),
+    RedactChat(usize, usize),
     DeleteChat(usize, usize),
     DeleteAccount(usize),
     Chat(usize, usize, Option<UID>),
@@ -412,6 +442,7 @@ enum AfterSelectServer {
 enum AfterSelectFriend {
     Remove,
     Open,
+    Redact,
     Delete,
 }
 
@@ -623,7 +654,8 @@ fn cmd_client() {
                 println!("add: Add friend");
                 println!("remove: Remove friend");
                 println!("download: Download all chats from added friends");
-                println!("delete: Delete chat with friend");
+                println!("redact: Redact chat with friend (replace sent messages with placeholder)");
+                println!("delete_chat: Delete chat with friend (delete sent messages)");
                 println!("delete_account: Delete entire account");
                 println!("open: Open chat");
                 println!("exit: Exit to server list");
@@ -638,7 +670,8 @@ fn cmd_client() {
                     Some("add") => AddFriend(i),
                     Some("remove") => SelectFriend(i, AfterSelectFriend::Remove),
                     Some("download") => DownloadChats(i),
-                    Some("delete") => SelectFriend(i, AfterSelectFriend::Delete),
+                    Some("redact") => SelectFriend(i, AfterSelectFriend::Redact),
+                    Some("delete_chat") => SelectFriend(i, AfterSelectFriend::Delete),
                     Some("delete_account") => DeleteAccount(i),
                     Some("open") => SelectFriend(i, AfterSelectFriend::Open),
                     Some("exit") => ServerList,
@@ -701,6 +734,7 @@ fn cmd_client() {
                         println!("All other inputs are sent as messages.");
                         Chat(i, j - 1, None)
                     },
+                    (Some(j), AfterSelectFriend::Redact) => RedactChat(i, j - 1),
                     (Some(j), AfterSelectFriend::Delete) => DeleteChat(i, j - 1),
                     (None, _) => FriendList(i)
                 }
@@ -767,7 +801,7 @@ fn cmd_client() {
               
               FriendList(i)
             }
-            DeleteChat(i, j) => {
+            RedactChat(i, j) => {
               let conn = servers[i].1.as_ref().unwrap();
               let friends = &servers[i].2;
               let friend = &friends[j];
@@ -781,6 +815,17 @@ fn cmd_client() {
                     println!("Error while deleting message: {}", msg);
                   }
                 }
+              }
+              FriendList(i) 
+            }
+            DeleteChat(i, j) => {
+              let conn = servers[i].1.as_ref().unwrap();
+              let friends = &servers[i].2;
+              let friend = &friends[j];
+              let res = delete_chat(conn, friend.clone());
+              match res {
+                Err(s) => println!("{}", s),
+                Ok(_) => (),
               }
               FriendList(i) 
             }
