@@ -3,11 +3,7 @@
 #[macro_use] extern crate rocket;
 
 use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-    path::PathBuf,
-    process,
-    fs,
+    collections::HashMap, fs, path::PathBuf, process::exit, sync::RwLock
 };
 use ed25519_dalek::Signature;
 use rocket::{
@@ -19,17 +15,31 @@ use synapsis::{
     crypto::{vrfy, VerifyKeyPair},
     network::{PutData, RegisterData, UserID, UserVerification},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use derive_more::{Deref, DerefMut};
 
-type StorageInner = HashMap<UserID, Arc<RwLock<HashMap<String, Value>>>>;
-type Storage = Arc<RwLock<StorageInner>>;
+type Storage = RwLock<StorageInner>;
+
+#[derive(Default, Serialize, Deserialize, Deref, DerefMut)]
+struct StorageInner(HashMap<UserID, RwLock<HashMap<String, Value>>>);
+
+const STORAGE_FILENAME: &str = "database.json";
+
+impl Drop for StorageInner {
+  fn drop(&mut self) {
+    println!("Saving storage to {}...", STORAGE_FILENAME);
+    fs::write(STORAGE_FILENAME, serde_json::ser::to_string(self).unwrap()).unwrap();
+    println!("Saved.");
+  }
+}
 
 fn make_user(storage: &Storage, user: UserID) -> Result<Status, Status> {
     if let Ok(mut storage) = storage.write() {
         if storage.contains_key(&user) {
             Err(Status::Conflict)
         } else {
-            storage.insert(user.clone(), Arc::new(RwLock::new(HashMap::new())));
+            storage.insert(user.clone(), RwLock::new(HashMap::new()));
             Ok(Status::Ok)
         }
     } else {
@@ -168,15 +178,7 @@ fn register(storage: State<Storage>, data: Json<RegisterData>) -> Result<Status,
         .and(put_data(storage, data.user_id, "pkv".to_string(), pkv))
 }
 
-fn rocket() -> rocket::Rocket {
-    let storage = storage();
-    let ctrlc_storage = storage.clone();
-
-    //TODO: impl Drop for the storage
-    ctrlc::set_handler(move || {
-        fs::write("database.json", serde_json::ser::to_string(&ctrlc_storage).unwrap()).unwrap();
-        process::exit(0);
-    }).expect("Error setting Ctrl-C handler");
+fn rocket(storage: Storage) -> rocket::Rocket {
 
     rocket::ignite()
         .mount("/", routes![register, get, put, delete, delete_path])
@@ -184,14 +186,23 @@ fn rocket() -> rocket::Rocket {
 }
 
 fn storage() -> Storage {
-    fs::read_to_string("database.json").ok()
+    fs::read_to_string(STORAGE_FILENAME).ok()
         .and_then(|db| serde_json::from_str::<Storage>(&db[..]).ok())
         .unwrap_or_default()
 }
 
 fn main() {
-    rocket()
+    let storage = storage();
+
+    ctrlc::set_handler(|| {
+      println!("Exiting...");
+      ()
+    }).expect("Failed to set ctrlc handler.");
+
+    rocket(storage)
         .launch();
+
+    println!("After launch");
 }
 
 #[cfg(test)]
