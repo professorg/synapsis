@@ -9,32 +9,13 @@ use crypto::{
 use serde::{
     Serialize,
     Deserialize,
-    /*
-    ser::{SerializeStruct, Serializer},
-    de::{self, Deserializer, Visitor, SeqAccess, MapAccess},
-    */
 };
 use std::{
-    /*
-    fmt,
-    */
-    iter::repeat,
-    io::Cursor,
+    io::Cursor, iter::repeat
 };
 use byteorder::{BigEndian, ReadBytesExt};
-use p256::{
-    /*
-    EncodedPoint,
-    */
-    elliptic_curve::rand_core::{
-        self, CryptoRng, RngCore, impls, OsRng
-    },
-    /*
-    ecdsa::{
-        SigningKey, VerifyingKey, Signature,
-        signature::{Signer, Verifier},
-    },
-    */
+use p256::elliptic_curve::rand_core::{
+    self, CryptoRng, RngCore, impls, OsRng
 };
 use ecies_ed25519::{self, Error::InvalidSecretKeyBytes};
 use ed25519_dalek::{self, Keypair, Signature, Signer, Verifier};
@@ -74,6 +55,13 @@ impl RngCore for Sha256Rng {
     }
 }
 
+pub fn next_u128() -> u128 {
+  let mut bytes: [u8;16] = [0; 16];
+  OsRng.fill_bytes(bytes.as_mut());
+  let out: u128 = u128::from_be_bytes(bytes);
+  out
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct PrivateKey(pub Vec<u8>);
 
@@ -107,128 +95,6 @@ impl VerifyKeyPair {
     }
 }
 
-/*
-pub struct VerifyKeyPair {
-    pk: VerifyingKey,
-    sk: Option<SigningKey>,
-}
-
-impl Serialize for VerifyKeyPair {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("VerifyKeyPair", 2)?;
-        state.serialize_field("pk", &self.pk.to_encoded_point(false).as_bytes())?;
-        let mut sk_vec = Vec::new();
-        let sk = match self.sk.as_ref() {
-            None => None,
-            Some(x) => {
-                sk_vec = Vec::from(x.to_bytes().as_slice());
-                Some(())
-            },
-        };
-        state.serialize_field("sk", &sk.and(Some(&sk_vec[..])))?;
-        state.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for VerifyKeyPair {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize, Debug)]
-        #[serde(field_identifier, rename_all = "lowercase")]
-        enum Field { Pk, Sk }
-
-        struct VerifyKeyPairVisitor;
-
-        impl<'de> Visitor<'de> for VerifyKeyPairVisitor {
-            type Value = VerifyKeyPair;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("struct VerifyKeyPair")
-            }
-
-            fn visit_seq<V>(self, mut seq: V) -> Result<VerifyKeyPair, V::Error>
-            where
-                V: SeqAccess<'de>,
-            {
-                let pk: Vec<u8> = seq.next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
-                let sk: Option<Vec<u8>> = seq.next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
-
-                let ep = EncodedPoint::from_bytes(pk)
-                        .map_err(|_| de::Error::custom("could not get encoded point from bytes"))?;
-                let pk = VerifyingKey::from_encoded_point(&ep)
-                    .map_err(|_| de::Error::custom("could not get verifying key from encoded point"))?;
-                let sk = match sk {
-                    None => None,
-                    Some(x) => Some(
-                        SigningKey::from_bytes(&x[..])
-                            .map_err(|_| de::Error::custom("could not get signing key from bytes"))?
-                    ),
-                };
-
-                Ok(VerifyKeyPair{
-                    pk: pk,
-                    sk: sk,
-                })
-            }
-
-            fn visit_map<V>(self, mut map: V) -> Result<VerifyKeyPair, V::Error>
-            where
-                V: MapAccess<'de>
-            {
-                let mut pk = None;
-                let mut sk = None;
-                while let Some(key) = map.next_key()? {
-                    match key {
-                        Field::Pk => {
-                            if pk.is_some() {
-                                return Err(de::Error::duplicate_field("pk"));
-                            }
-                            let a = map.next_value();
-                            pk = Some(a?);
-                        }
-                        Field::Sk => {
-                            if sk.is_some() {
-                                return Err(de::Error::duplicate_field("sk"));
-                            }
-                            sk = Some(map.next_value()?);
-                        }
-                    }
-                }
-                let pk: Vec<u8> = pk.ok_or_else(|| de::Error::missing_field("pk"))?;
-                let sk: Option<Vec<u8>> = sk.ok_or_else(|| de::Error::missing_field("sk"))?;
-
-                let ep = EncodedPoint::from_bytes(pk)
-                        .map_err(|_| de::Error::custom("could not get encoded point from bytes"))?;
-                let pk = VerifyingKey::from_encoded_point(&ep)
-                    .map_err(|_| de::Error::custom("could not get verifying key from encoded point"))?;
-                let sk = match sk {
-                    None => None,
-                    Some(x) => Some(
-                        SigningKey::from_bytes(&x[..])
-                            .map_err(|_| de::Error::custom("could not get signing key from bytes"))?
-                    ),
-                };
-
-                Ok(VerifyKeyPair{
-                    pk: pk,
-                    sk: sk,
-                })
-            }
-        }
-
-        const FIELDS: &'static [&'static str] = &["pk", "sk"];
-        deserializer.deserialize_struct("VerifyKeyPair", FIELDS, VerifyKeyPairVisitor)
-    }
-}
-*/
-
 pub fn gen_prv(username: &str, password: &str) -> PrivateKey {
     let mut key: Vec<u8> = repeat(0u8).take(32).collect();
     let mut rng = Sha256Rng::new(username, password);
@@ -250,17 +116,6 @@ pub fn gen_ver(username: &str, password: &str) -> VerifyKeyPair {
     let keypair: Keypair = Keypair::generate(&mut rng);
     VerifyKeyPair::Keypair(keypair)
 }
-
-/*
-pub fn gen_ver(username: &str, password: &str) -> VerifyKeyPair {
-    let signing_key = SigningKey::random(Sha256Rng::new(username, password));
-    let verifying_key = signing_key.verify_key();
-    VerifyKeyPair{
-        pk: verifying_key,
-        sk: Some(signing_key),
-    }
-}
-*/
 
 pub fn enc_prv(message: &[u8], key: &PrivateKey) -> (Vec<u8>, Vec<u8>) {
     let mut output: Vec<u8> = repeat(0u8).take(message.len()).collect();
@@ -302,18 +157,6 @@ pub fn vrfy(message: &[u8], signature: Signature, keys: &VerifyKeyPair) -> bool 
         VerifyKeyPair::PubKey(pk) => pk.verify(message, &signature).is_ok(),
     }
 }
-
-/*
-pub fn sign(message: &[u8], keys: &VerifyKeyPair) -> Option<Signature> {
-    let sk = keys.sk.as_ref()?;
-    let signature = sk.sign(message);
-    Some(signature)
-}
-
-pub fn vrfy(message: &[u8], signature: Signature, keys: &VerifyKeyPair) -> bool {
-    keys.pk.verify(message, &signature).is_ok()
-}
-*/
 
 #[cfg(test)]
 mod test {

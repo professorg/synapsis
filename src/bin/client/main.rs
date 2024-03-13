@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use ed25519_dalek::Signature;
+use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use synapsis::{
     crypto::{
         dec_prv, dec_pub, enc_prv, enc_pub, gen_prv, gen_pub, gen_ver, sign, PrivateKey, PublicKeyPair, VerifyKeyPair
-    }, network::{Message, MessageData, PutData, RegisterData, UserVerification, UID}
+    }, network::{from_username, Message, MessageData, PutData, RegisterData, UserID, UserVerification, UID}
 };
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use reqwest::blocking::{Client, Response};
 use std::{
     fs,
@@ -18,6 +18,7 @@ struct Connection {
     address: String,
     client: Client,
     username: String,
+    user_id: UserID,
     pkp: PublicKeyPair,
     pkv: VerifyKeyPair,
     sk: PrivateKey,
@@ -28,12 +29,13 @@ impl Connection {
         let pub_keypair = gen_pub(username, password);
         let ver_keypair = gen_ver(username, password);
         let sk = gen_prv(username, password);
+        let user_id = from_username(username.to_string());
 
         let client = reqwest::blocking::Client::new();
 
         if register {
             let data = RegisterData {
-                username: username.to_string(),
+                user_id,
                 pkp: pub_keypair.pubkey(),
                 pkv: ver_keypair.pubkey(),
             };
@@ -44,6 +46,7 @@ impl Connection {
             address: address.to_string(),
             client: client.clone(),
             username: username.to_string(),
+            user_id,
             pkp: pub_keypair,
             pkv: ver_keypair,
             sk,
@@ -52,7 +55,7 @@ impl Connection {
 }
 
 struct MessageDe {
-    from: String,
+    from: UserID,
     message: String,
     timestamp: Duration,
     prev: Option<UID>,
@@ -61,16 +64,16 @@ struct MessageDe {
 
 struct Messages<'a> {
     conn: &'a Connection,
-    with: String, 
+    with: UserID, 
     sent: Option<MessageDe>,
     recv: Option<MessageDe>,
     until: Option<UID>,
 }
 
 impl<'a> Messages<'a> {
-    fn new(conn: &'a Connection, with: String, until: Option<UID>) -> Self {
-        let sent = get_sent_message_head(&conn, with.clone());
-        let recv = get_recv_message_head(&conn, with.clone());
+    fn new(conn: &'a Connection, with: UserID, until: Option<UID>) -> Self {
+        let sent = get_sent_message_head(&conn, with);
+        let recv = get_recv_message_head(&conn, with);
         Messages {
             conn,
             with,
@@ -92,7 +95,7 @@ impl<'a> Iterator for Messages<'a> {
                     if until == sent.uid { return None; }
                 }
                 self.sent = if let Some(uid) = sent.prev {
-                    get_sent_message(&self.conn, self.with.clone(), uid)
+                    get_sent_message(&self.conn, self.with, uid)
                 } else { None };
                 Some(sent)
             } else {
@@ -101,7 +104,7 @@ impl<'a> Iterator for Messages<'a> {
                     if until == recv.uid { return None; }
                 }
                 self.recv = if let Some(uid) = recv.prev {
-                    get_recv_message(&self.conn, self.with.clone(), uid)
+                    get_recv_message(&self.conn, self.with, uid)
                 } else { None };
                 Some(recv)
             }
@@ -111,7 +114,7 @@ impl<'a> Iterator for Messages<'a> {
                 if until == sent.uid { return None; }
             }
             self.sent = if let Some(uid) = sent.prev {
-                get_sent_message(&self.conn, self.with.clone(), uid)
+                get_sent_message(&self.conn, self.with, uid)
             } else { None };
             Some(sent)
         } else if self.recv.is_some() {
@@ -120,7 +123,7 @@ impl<'a> Iterator for Messages<'a> {
                 if until == recv.uid { return None; }
             }
             self.recv = if let Some(uid) = recv.prev {
-                get_recv_message(&self.conn, self.with.clone(), uid)
+                get_recv_message(&self.conn, self.with, uid)
             } else { None };
             Some(recv)
         } else {
@@ -129,12 +132,12 @@ impl<'a> Iterator for Messages<'a> {
     }
 }
 
-fn get_sent_message(conn: &Connection, to: String, uid: UID) -> Option<MessageDe> {
-    let message = get_data(&format!("{}/{}/{}/{}", conn.address, conn.username.clone(), to, uid)[..], &conn.client).ok()?.text().ok()?;
+fn get_sent_message(conn: &Connection, to: UserID, uid: UID) -> Option<MessageDe> {
+    let message = get_data(&format!("{}/{}/{}/{}", conn.address, conn.user_id, to, uid)[..], &conn.client).ok()?.text().ok()?;
     let message_de: Message = serde_json::from_str(&message[..]).ok()?;
     let message = dec_prv(&message_de.message_cc.1[..], &conn.sk, &message_de.message_cc.0[..]);
     Some(MessageDe {
-        from: conn.username.clone(),
+        from: conn.user_id,
         message: String::from_utf8(message).ok()?,
         timestamp: message_de.timestamp,
         prev: message_de.prev,
@@ -142,8 +145,8 @@ fn get_sent_message(conn: &Connection, to: String, uid: UID) -> Option<MessageDe
     })
 }
 
-fn get_sent_message_head(conn: &Connection, to: String) -> Option<MessageDe> {
-    let data = get_data(&format!("{}/{}/{}/head", conn.address, conn.username.clone(), to)[..], &conn.client).ok()?.text().ok()?;
+fn get_sent_message_head(conn: &Connection, to: UserID) -> Option<MessageDe> {
+    let data = get_data(&format!("{}/{}/{}/head", conn.address, conn.user_id, to)[..], &conn.client).ok()?.text().ok()?;
     let head = serde_json::from_str(&data[..]);
     //println!("get_sent_message_head: {:#?}", head);
     let head: Option<UID> = head.ok()?;
@@ -151,8 +154,8 @@ fn get_sent_message_head(conn: &Connection, to: String) -> Option<MessageDe> {
     get_sent_message(conn, to, head)
 }
 
-fn get_recv_message(conn: &Connection, from: String, uid: UID) -> Option<MessageDe> {
-    let message = get_data(&format!("{}/{}/{}/{}", conn.address, from, conn.username.clone(), uid)[..], &conn.client);
+fn get_recv_message(conn: &Connection, from: UserID, uid: UID) -> Option<MessageDe> {
+    let message = get_data(&format!("{}/{}/{}/{}", conn.address, from, conn.user_id, uid)[..], &conn.client);
     //println!("get_recv_message: {:#?}", message);
     let message = message.ok()?.text().ok()?;
     //println!("get_recv_message (ok): {:#?}", message);
@@ -164,7 +167,7 @@ fn get_recv_message(conn: &Connection, from: String, uid: UID) -> Option<Message
     //println!("get_recv_message (from_utf8): {:#?}", message);
     let message = message.ok()?;
     Some(MessageDe {
-        from: from.clone(),
+        from,
         message,
         timestamp: message_de.timestamp,
         prev: message_de.prev,
@@ -172,8 +175,8 @@ fn get_recv_message(conn: &Connection, from: String, uid: UID) -> Option<Message
     })
 }
 
-fn get_recv_message_head(conn: &Connection, from: String) -> Option<MessageDe> {
-    let data = get_data(&format!("{}/{}/{}/head", conn.address, from, conn.username.clone())[..], &conn.client).ok()?.text().ok()?;
+fn get_recv_message_head(conn: &Connection, from: UserID) -> Option<MessageDe> {
+    let data = get_data(&format!("{}/{}/{}/head", conn.address, from, conn.user_id)[..], &conn.client).ok()?.text().ok()?;
     let head = serde_json::from_str(&data[..]);
     //println!("get_recv_message_head: {:#?}", head);
     let head: Option<UID> = head.ok()?;
@@ -181,9 +184,9 @@ fn get_recv_message_head(conn: &Connection, from: String) -> Option<MessageDe> {
     get_recv_message(conn, from, head)
 }
 
-fn get_pkp(conn: &Connection, to: &String) -> Option<PublicKeyPair> {
+fn get_pkp(conn: &Connection, to: UserID) -> Option<PublicKeyPair> {
   let pkp =
-    get_data(&format!("{}/{}/pkp", &conn.address[..], to.clone())[..], &conn.client) 
+    get_data(&format!("{}/{}/pkp", &conn.address[..], to)[..], &conn.client) 
       .ok()
       .filter(|res| res.status().is_success())
       .and_then(|res| res.text().ok())
@@ -194,7 +197,7 @@ fn get_pkp(conn: &Connection, to: &String) -> Option<PublicKeyPair> {
 }
 
 fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
-    let head = get_data(&format!("{}/{}/{}/head", &conn.address[..], conn.username, data.to)[..], &conn.client)
+    let head = get_data(&format!("{}/{}/{}/head", &conn.address[..], conn.user_id, data.to)[..], &conn.client)
         .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
         .and_then(|res|
             if res.status().is_success() {
@@ -210,7 +213,7 @@ fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::S
         None => None,
     };
     let head = head.and_then(|uid|
-        Some(serde_json::from_str::<u64>(&uid[..])));
+        Some(serde_json::from_str::<UID>(&uid[..])));
     let head = match head {
         Some(Ok(a)) => Some(a),
         Some(Err(_)) => return Err(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
@@ -219,7 +222,7 @@ fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::S
 
     //TODO: cache this
     let pkp =
-      get_pkp(conn, &data.to)
+      get_pkp(conn, data.to)
         .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
     let message = enc_pub(data.message.as_bytes(), &pkp);
     let message_cc = enc_prv(data.message.as_bytes(), &conn.sk);
@@ -232,9 +235,8 @@ fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::S
             prev: head,
             uid,
         };
-    //let message = serde_json::to_string(&message)
-    //    .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let message_val = serde_json::json!(message);
+    let message_val =
+      serde_json::json!(message);
     let message_str = serde_json::ser::to_string(&message_val).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
     let signature = sign(&message_str.as_bytes()[..], &conn.pkv)
         .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -243,7 +245,7 @@ fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::S
         data: message_val,
         signature,
     };
-    put_data(&format!("{}/{}/{}/{}", &conn.address, conn.username, data.to, uid)[..], &conn.client, msg_data)
+    put_data(&format!("{}/{}/{}/{}", &conn.address, conn.user_id, data.to, uid)[..], &conn.client, msg_data)
         .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
         .and_then(|res|
             if res.status().is_success() {
@@ -260,7 +262,7 @@ fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::S
         data: uid_val,
         signature,
     };
-    put_data(&format!("{}/{}/{}/head", &conn.address[..], conn.username, data.to)[..], &conn.client, uid_data)
+    put_data(&format!("{}/{}/{}/head", &conn.address[..], conn.user_id, data.to)[..], &conn.client, uid_data)
         .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
         .and_then(|res|
             if res.status().is_success() {
@@ -270,8 +272,8 @@ fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::S
             })
 }
 
-fn redact_chat_message(conn: &Connection, to: &String, uid: u64) -> Result<(), String> {
-  let message_orig: MessageDe = get_sent_message(conn, to.clone(), uid).ok_or("Not found")?;
+fn redact_chat_message(conn: &Connection, to: UserID, uid: UID) -> Result<(), String> {
+  let message_orig: MessageDe = get_sent_message(conn, to, uid).ok_or("Not found")?;
   let message_redacted = MessageDe {
     message: "[deleted message]".to_string(),
     ..message_orig
@@ -300,38 +302,44 @@ fn redact_chat_message(conn: &Connection, to: &String, uid: u64) -> Result<(), S
       data: message_val,
       signature,
   };
-  put_data(&format!("{}/{}/{}/{}", &conn.address, conn.username, to, uid)[..], &conn.client, msg_data)
+  put_data(&format!("{}/{}/{}/{}", &conn.address, conn.user_id, to, uid)[..], &conn.client, msg_data)
     .map_err(|_| "Failed to update redacted message")?;
   Ok(())
 }
 
-fn delete_chat_message_simple(conn: &Connection, to: &String, uid: u64) -> Result<(), String> {
+fn delete_chat_message_simple(conn: &Connection, to: UserID, uid: UID) -> Result<(), String> {
   let path = format!("{}/{}", to, uid);
   let sig =
     sign(path.as_bytes(), &conn.pkv)
       .ok_or("Failed to sign path")?;
-  delete_path(&format!("{}/{}/{}", &conn.address[..], &conn.username[..], &path[..])[..], &conn.client, sig)
+  delete_path(&format!("{}/{}/{}", &conn.address[..], conn.user_id, &path[..])[..], &conn.client, sig)
     .map_err(|_| "Failed to delete data")?;
   Ok(())
 }
 
 fn get_friends(conn: &Connection) -> Option<Vec<String>> {
-  let response = get_data(&format!("{}/{}/friends", &conn.address[..], conn.username), &conn.client);
+  let response = get_data(&format!("{}/{}/friends", &conn.address[..], conn.user_id), &conn.client);
   let txt = response.ok()?.text().ok()?;
-  let friends = serde_json::from_str(&txt[..]).ok()?;
+  let txt_dec: (Vec<u8>, Vec<u8>) = serde_json::from_str(&txt[..]).ok()?;
+  let (nonce, friends_enc) = txt_dec;
+  let friends_bytes = dec_prv(&friends_enc[..], &conn.sk, &nonce[..]);
+  let friends_str = String::from_utf8(friends_bytes).ok()?;
+  let friends = serde_json::from_str(&friends_str).ok()?;
   friends
 }
 
 fn put_friends(conn: &Connection, friends: Vec<String>) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
-  let friends_val = serde_json::json!(&friends);
-  let friends_str = serde_json::ser::to_string(&friends_val).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
-  let signature = sign(&friends_str[..].as_bytes()[..], &conn.pkv)
+  let friends_str = serde_json::ser::to_string(&friends).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+  let friends_enc = enc_prv(friends_str.as_bytes(), &conn.sk);
+  let friends_enc_val = serde_json::json!(&friends_enc);
+  let friends_enc_str = serde_json::ser::to_string(&friends_enc_val).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+  let signature = sign(&friends_enc_str[..].as_bytes()[..], &conn.pkv)
         .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
   let data = PutData {
-    data: friends_val,
+    data: friends_enc_val,
     signature,
   };
-  put_data(&format!("{}/{}/friends", &conn.address[..], conn.username), &conn.client, data)
+  put_data(&format!("{}/{}/friends", &conn.address[..], conn.user_id), &conn.client, data)
     .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
     .and_then(|res|
         if res.status().is_success() {
@@ -349,8 +357,9 @@ fn register_keys(address: &str, client: &Client, data: RegisterData) -> reqwest:
 
 fn delete_user(conn: &Connection) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
   let user = conn.username.clone();
+  let user_id = from_username(user.clone());
   let reg_data = RegisterData {
-      username: user.clone(),
+      user_id,
       pkp: conn.pkp.pubkey(),
       pkv: conn.pkv.pubkey(),
   };
@@ -371,11 +380,11 @@ fn delete_user(conn: &Connection) -> Result<reqwest::StatusCode, reqwest::Status
         })
 }
 
-fn delete_chat(conn: &Connection, with: String) -> Result<(), String> {
-  let messages = Messages::new(conn, with.clone(), None);
+fn delete_chat(conn: &Connection, with: UserID) -> Result<(), String> {
+  let messages = Messages::new(conn, with, None);
   let res = messages
     .map(|m| m.uid)
-    .map(|uid| delete_chat_message_simple(conn, &with.clone(), uid))
+    .map(|uid| delete_chat_message_simple(conn, with, uid))
     .reduce(|acc, e| acc.and(e));
   match res {
     None => Ok(()),
@@ -425,7 +434,7 @@ enum ReadState {
     RedactChat(usize, usize),
     DeleteChat(usize, usize),
     DeleteAccount(usize),
-    Chat(usize, usize, Option<UID>),
+    Chat(usize, usize, String, Option<UID>),
 }
 
 enum AfterSelectFile {
@@ -732,7 +741,8 @@ fn cmd_client() {
                         println!("/quit: quit Synapsis");
                         println!("Leave blank to get new messages.");
                         println!("All other inputs are sent as messages.");
-                        Chat(i, j - 1, None)
+                        let username = servers[i].2[j - 1].clone();
+                        Chat(i, j - 1, username, None)
                     },
                     (Some(j), AfterSelectFriend::Redact) => RedactChat(i, j - 1),
                     (Some(j), AfterSelectFriend::Delete) => DeleteChat(i, j - 1),
@@ -770,7 +780,10 @@ fn cmd_client() {
               let friends = servers[i].2.iter();
               let friends_messages =
                 friends
-                  .map(|friend| (friend.clone(), Messages::new(&conn.unwrap(), friend.clone(), None)));
+                  .map(|x| from_username(x.clone()))
+                  .map(|friend| (
+                    friend.clone(),
+                    Messages::new(&conn.unwrap(), friend.clone(), None)));
               let chats = 
                 friends_messages
                   .map(|(friend, messages)|
@@ -804,11 +817,12 @@ fn cmd_client() {
             RedactChat(i, j) => {
               let conn = servers[i].1.as_ref().unwrap();
               let friends = &servers[i].2;
-              let friend = &friends[j];
+              let friend = friends[j].clone();
+              let friend = from_username(friend);
               //TODO: Use separate iterator for only sent messages
-              let messages = Messages::new(&conn, friend.clone(), None); 
+              let messages = Messages::new(&conn, friend, None); 
               for message in messages {
-                if message.from == conn.username {
+                if message.from == conn.user_id {
                   let uid = message.uid;
                   let res = redact_chat_message(conn, friend, uid);
                   if let Err(msg) = res {
@@ -821,8 +835,9 @@ fn cmd_client() {
             DeleteChat(i, j) => {
               let conn = servers[i].1.as_ref().unwrap();
               let friends = &servers[i].2;
-              let friend = &friends[j];
-              let res = delete_chat(conn, friend.clone());
+              let friend = friends[j].clone();
+              let friend = from_username(friend);
+              let res = delete_chat(conn, friend);
               match res {
                 Err(s) => println!("{}", s),
                 Ok(_) => (),
@@ -837,7 +852,8 @@ fn cmd_client() {
               }
               ServerList
             }
-            Chat(i, j, until) => {
+            Chat(i, j, username, until) => {
+                let conn = servers[i].1.as_ref().unwrap();
                 let mut last: Option<UID> = until;
                 print!("> ");
                 stdout().flush().unwrap();
@@ -851,7 +867,8 @@ fn cmd_client() {
                 } else {
                     if !input.is_empty() {
                         let to = servers[i].2[j].clone();
-                        let res = send_chat_message(&mut servers[i].1.as_mut().unwrap(), &MessageData {
+                        let to = from_username(to);
+                        let res = send_chat_message(conn, &MessageData {
                             to,
                             message: input.clone(),
                         });
@@ -859,12 +876,21 @@ fn cmd_client() {
                             println!("Failed to send message. User not found.");
                         }
                     }
-                    let messages = Messages::new(&servers[i].1.as_ref().unwrap(), servers[i].2[j].clone(), until);
+                    let friend = servers[i].2[j].clone();
+                    let friend = from_username(friend);
+                    let messages = Messages::new(&servers[i].1.as_ref().unwrap(), friend, until);
                     for msg in messages.collect::<Vec<_>>().iter().rev() {
+                        let from_id = msg.from;
+                        let from_username =
+                          if from_id == conn.user_id {
+                            conn.username.clone()
+                          } else {
+                            username.clone()
+                          };
                         last = Some(msg.uid);
-                        println!("{}: {}", msg.from, msg.message);
+                        println!("{}: {}", from_username, msg.message);
                     }
-                    Chat(i, j, last)
+                    Chat(i, j, username, last)
                 }
             }
         };

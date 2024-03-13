@@ -17,15 +17,14 @@ use rocket::{
 use rocket_contrib::json::Json;
 use synapsis::{
     crypto::{vrfy, VerifyKeyPair},
-    network::{PutData, RegisterData, UserVerification},
+    network::{PutData, RegisterData, UserID, UserVerification},
 };
 use serde_json::Value;
 
-type Username = String;
-type StorageInner = HashMap<Username, Arc<RwLock<HashMap<String, Value>>>>;
+type StorageInner = HashMap<UserID, Arc<RwLock<HashMap<String, Value>>>>;
 type Storage = Arc<RwLock<StorageInner>>;
 
-fn make_user(storage: &Storage, user: String) -> Result<Status, Status> {
+fn make_user(storage: &Storage, user: UserID) -> Result<Status, Status> {
     if let Ok(mut storage) = storage.write() {
         if storage.contains_key(&user) {
             Err(Status::Conflict)
@@ -38,7 +37,7 @@ fn make_user(storage: &Storage, user: String) -> Result<Status, Status> {
     }
 }
 
-fn delete_user(storage: &Storage, user: String) -> Result<Status, Status> {
+fn delete_user(storage: &Storage, user: UserID) -> Result<Status, Status> {
   if let Ok(mut storage) = storage.write() {
     storage.remove(&user);
     Ok(Status::Ok)
@@ -47,7 +46,7 @@ fn delete_user(storage: &Storage, user: String) -> Result<Status, Status> {
   }
 }
 
-fn delete_data(storage: &Storage, user: String, path: String) -> Result<Status, Status> {
+fn delete_data(storage: &Storage, user: UserID, path: String) -> Result<Status, Status> {
   if let Ok(storage) = storage.read() {
     if let Some(inner) = storage.get(&user) {
       if let Ok(mut inner) = inner.write() {
@@ -64,7 +63,7 @@ fn delete_data(storage: &Storage, user: String, path: String) -> Result<Status, 
   }
 }
 
-fn put_data(storage: &Storage, user: String, path: String, data: Value) -> Result<Status, Status> {
+fn put_data(storage: &Storage, user: UserID, path: String, data: Value) -> Result<Status, Status> {
     if let Ok(storage) = storage.read() {
         if let Some(inner) = storage.get(&user) {
             if let Ok(mut inner) = inner.write() {
@@ -81,7 +80,7 @@ fn put_data(storage: &Storage, user: String, path: String, data: Value) -> Resul
     }
 }
 
-fn get_data(storage: &Storage, user: String, path: String) -> Result<Value, Status> {
+fn get_data(storage: &Storage, user: UserID, path: String) -> Result<Value, Status> {
     if let Ok(storage) = storage.read() {
         if let Some(inner) = storage.get(&user) {
             if let Ok(inner) = inner.read() {
@@ -102,7 +101,7 @@ fn get_data(storage: &Storage, user: String, path: String) -> Result<Value, Stat
 }
 
 #[get("/<user>/<path..>")]
-fn get(storage: State<Storage>, user: String, path: PathBuf) -> Result<String, Status> {
+fn get(storage: State<Storage>, user: UserID, path: PathBuf) -> Result<String, Status> {
     let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
     let res = get_data(storage.inner(), user, path);
     res
@@ -112,7 +111,7 @@ fn get(storage: State<Storage>, user: String, path: PathBuf) -> Result<String, S
 }
 
 #[put("/<user>/<path..>", format = "application/json", data = "<data>")]
-fn put(storage: State<Storage>, user: String, path: PathBuf, data: Json<PutData>) -> Result<Status, Status> {
+fn put(storage: State<Storage>, user: UserID, path: PathBuf, data: Json<PutData>) -> Result<Status, Status> {
     let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
     let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
     let pk: VerifyKeyPair = serde_json::from_value(pk)
@@ -126,7 +125,7 @@ fn put(storage: State<Storage>, user: String, path: PathBuf, data: Json<PutData>
 }
 
 #[delete("/<user>", format = "application/json", data = "<data>")]
-fn delete(storage: State<Storage>, user: String, data: Json<UserVerification>) -> Result<Status, Status> {
+fn delete(storage: State<Storage>, user: UserID, data: Json<UserVerification>) -> Result<Status, Status> {
   let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
   let pk: VerifyKeyPair = serde_json::from_value(pk)
     .map_err(|_| Status::InternalServerError)?;
@@ -144,7 +143,7 @@ fn delete(storage: State<Storage>, user: String, data: Json<UserVerification>) -
 }
 
 #[delete("/<user>/<path..>", format = "application/json", data = "<signature>")]
-fn delete_path(storage: State<Storage>, user: String, path: PathBuf, signature: Json<Signature>) -> Result<Status, Status> {
+fn delete_path(storage: State<Storage>, user: UserID, path: PathBuf, signature: Json<Signature>) -> Result<Status, Status> {
   let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
   let pk: VerifyKeyPair = serde_json::from_value(pk)
     .map_err(|_| Status::InternalServerError)?;
@@ -164,9 +163,9 @@ fn register(storage: State<Storage>, data: Json<RegisterData>) -> Result<Status,
         .map_err(|_| Status::InternalServerError)?;
     let pkv = serde_json::value::to_value(&data.pkv)
         .map_err(|_| Status::InternalServerError)?;
-    make_user(storage, data.username.clone())
-        .and(put_data(storage, data.username.clone(), "pkp".to_string(), pkp))
-        .and(put_data(storage, data.username.clone(), "pkv".to_string(), pkv))
+    make_user(storage, data.user_id)
+        .and(put_data(storage, data.user_id, "pkp".to_string(), pkp))
+        .and(put_data(storage, data.user_id, "pkv".to_string(), pkv))
 }
 
 fn rocket() -> rocket::Rocket {
@@ -205,16 +204,18 @@ mod test {
         get_data,
     };
     use rocket::http::Status;
+    use synapsis::network::from_username;
 
     #[test]
     fn storage_make_user() {
         let storage = storage();
-        let username = "testuser";
-        assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
+        let username = "testuser".to_string();
+        let user_id = from_username(username);
+        assert_eq!(make_user(&storage, user_id), Ok(Status::Ok));
         assert!(
             storage
                 .read().unwrap()
-                .get(&username.to_string())
+                .get(&user_id)
                 .is_some()
         );
     }
@@ -222,23 +223,25 @@ mod test {
     #[test]
     fn storage_make_user_conflict() {
         let storage = storage();
-        let username = "testuser";
-        assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
-        assert_eq!(make_user(&storage, username.to_string()), Err(Status::Conflict));
+        let username = "testuser".to_string();
+        let user_id = from_username(username);
+        assert_eq!(make_user(&storage, user_id), Ok(Status::Ok));
+        assert_eq!(make_user(&storage, user_id), Err(Status::Conflict));
     }
 
     #[test]
     fn storage_put_data() {
         let storage = storage();
-        let username = "testuser";
+        let username = "testuser".to_string();
+        let user_id = from_username(username);
         let path = "some/path";
         let data = "some_data";
-        assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
-        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), serde_json::json!(data)), Ok(Status::Ok));
+        assert_eq!(make_user(&storage, user_id), Ok(Status::Ok));
+        assert_eq!(put_data(&storage, user_id, path.to_string(), serde_json::json!(data)), Ok(Status::Ok));
         assert_eq!(
             *storage
                 .read().unwrap()
-                .get(&username.to_string()).unwrap()
+                .get(&user_id).unwrap()
                 .read().unwrap()
                 .get(&path.to_string()).unwrap(),
             data
@@ -248,40 +251,44 @@ mod test {
     #[test]
     fn storage_put_data_not_found() {
         let storage = storage();
-        let username = "testuser";
+        let username = "testuser".to_string();
+        let user_id = from_username(username);
         let path = "some/path";
         let data = "some_data";
         // Do not create the account
         // assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
-        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), serde_json::json!(data)), Err(Status::NotFound));
+        assert_eq!(put_data(&storage, user_id, path.to_string(), serde_json::json!(data)), Err(Status::NotFound));
     }
 
     #[test]
     fn storage_get_data() {
         let storage = storage();
-        let username = "testuser";
+        let username = "testuser".to_string();
+        let user_id = from_username(username);
         let path = "some/path";
         let data = "some_data";
-        assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
-        assert_eq!(put_data(&storage, username.to_string(), path.to_string(), serde_json::json!(data)), Ok(Status::Ok));
-        assert_eq!(get_data(&storage, username.to_string(), path.to_string()).unwrap(), data.to_string());
+        assert_eq!(make_user(&storage, user_id), Ok(Status::Ok));
+        assert_eq!(put_data(&storage, user_id, path.to_string(), serde_json::json!(data)), Ok(Status::Ok));
+        assert_eq!(get_data(&storage, user_id, path.to_string()).unwrap(), data.to_string());
     }
 
     #[test]
     fn storage_get_data_user_not_found() {
         let storage = storage();
-        let username = "testuser";
+        let username = "testuser".to_string();
+        let user_id = from_username(username);
         let path = "some/path";
-        assert_eq!(get_data(&storage, username.to_string(), path.to_string()), Err(Status::NotFound));
+        assert_eq!(get_data(&storage, user_id, path.to_string()), Err(Status::NotFound));
     }
 
     #[test]
     fn storage_get_data_path_not_found() {
         let storage = storage();
-        let username = "testuser";
+        let username = "testuser".to_string();
+        let user_id = from_username(username);
         let path = "some/path";
-        assert_eq!(make_user(&storage, username.to_string()), Ok(Status::Ok));
-        assert_eq!(get_data(&storage, username.to_string(), path.to_string()), Err(Status::NotFound));
+        assert_eq!(make_user(&storage, user_id), Ok(Status::Ok));
+        assert_eq!(get_data(&storage, user_id, path.to_string()), Err(Status::NotFound));
     }
 
 }
