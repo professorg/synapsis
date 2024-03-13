@@ -3,7 +3,7 @@
 #[macro_use] extern crate rocket;
 
 use std::{
-    collections::HashMap, fs, path::PathBuf, process::exit, sync::RwLock
+    collections::HashMap, fs, panic, path::PathBuf, process::exit, sync::{Arc, RwLock}
 };
 use ed25519_dalek::Signature;
 use rocket::{
@@ -19,95 +19,79 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use derive_more::{Deref, DerefMut};
 
-type Storage = RwLock<StorageInner>;
+type Storage = Arc<RwLock<StorageInner>>;
 
 #[derive(Default, Serialize, Deserialize, Deref, DerefMut)]
 struct StorageInner(HashMap<UserID, RwLock<HashMap<String, Value>>>);
 
 const STORAGE_FILENAME: &str = "database.json";
 
-impl Drop for StorageInner {
-  fn drop(&mut self) {
+impl StorageInner {
+  fn write_to_fs(&self) {
     println!("Saving storage to {}...", STORAGE_FILENAME);
-    fs::write(STORAGE_FILENAME, serde_json::ser::to_string(self).unwrap()).unwrap();
+    fs::write(STORAGE_FILENAME, serde_json::ser::to_string(&self).unwrap()).unwrap();
     println!("Saved.");
   }
 }
 
 fn make_user(storage: &Storage, user: UserID) -> Result<Status, Status> {
-    if let Ok(mut storage) = storage.write() {
-        if storage.contains_key(&user) {
-            Err(Status::Conflict)
-        } else {
-            storage.insert(user.clone(), RwLock::new(HashMap::new()));
-            Ok(Status::Ok)
-        }
-    } else {
-        Err(Status::InternalServerError)
-    }
+  let mut storage =
+    storage
+      .write()
+      .map_err(|_| Status::InternalServerError)?;
+  if storage.contains_key(&user) {
+    Err(Status::Conflict)
+  } else {
+    storage.insert(user, RwLock::new(HashMap::new()));
+    Ok(Status::Ok)
+  }
 }
 
 fn delete_user(storage: &Storage, user: UserID) -> Result<Status, Status> {
-  if let Ok(mut storage) = storage.write() {
-    storage.remove(&user);
-    Ok(Status::Ok)
-  } else {
-    Err(Status::InternalServerError)
-  }
+  storage
+    .write()
+    .map_err(|_| Status::InternalServerError)?
+    .remove(&user)
+    .ok_or(Status::InternalServerError)?;
+  Ok(Status::Ok)
 }
 
 fn delete_data(storage: &Storage, user: UserID, path: String) -> Result<Status, Status> {
-  if let Ok(storage) = storage.read() {
-    if let Some(inner) = storage.get(&user) {
-      if let Ok(mut inner) = inner.write() {
-        inner.remove(&path);
-        Ok(Status::Ok)
-      } else {
-        Err(Status::InternalServerError)
-      }
-    } else {
-      Err(Status::NotFound)
-    }
-  } else {
-    Err(Status::InternalServerError)
-  }
+  storage
+    .read()
+    .map_err(|_| Status::InternalServerError)?
+    .get(&user)
+    .ok_or(Status::NotFound)?
+    .write()
+    .map_err(|_| Status::InternalServerError)?
+    .remove(&path)
+    .ok_or(Status::NotFound)?;
+  Ok(Status::Ok)
 }
 
 fn put_data(storage: &Storage, user: UserID, path: String, data: Value) -> Result<Status, Status> {
-    if let Ok(storage) = storage.read() {
-        if let Some(inner) = storage.get(&user) {
-            if let Ok(mut inner) = inner.write() {
-                inner.insert(path, data);
-                Ok(Status::Ok)
-            } else {
-                Err(Status::InternalServerError)
-            }
-        } else {
-            Err(Status::NotFound)
-        }
-    } else {
-        Err(Status::InternalServerError)
-    }
+  storage
+    .read()
+    .map_err(|_| Status::InternalServerError)?
+    .get(&user)
+    .ok_or(Status::NotFound)?
+    .write()
+    .map_err(|_| Status::InternalServerError)?
+    .insert(path, data);
+  Ok(Status::Ok)
 }
 
 fn get_data(storage: &Storage, user: UserID, path: String) -> Result<Value, Status> {
-    if let Ok(storage) = storage.read() {
-        if let Some(inner) = storage.get(&user) {
-            if let Ok(inner) = inner.read() {
-                if let Some(data) = inner.get(&path) {
-                    Ok(data.clone())
-                } else {
-                    Err(Status::NotFound)
-                }
-            } else {
-                Err(Status::InternalServerError)
-            }
-        } else {
-            Err(Status::NotFound)
-        }
-    } else {
-        Err(Status::InternalServerError)
-    }
+  storage
+    .read()
+    .map_err(|_| Status::InternalServerError)?
+    .get(&user)
+    .ok_or(Status::NotFound)?
+    .read()
+    .map_err(|_| Status::InternalServerError)?
+    .get(&path)
+    .map(Value::clone)
+    .ok_or(Status::NotFound)
 }
 
 #[get("/<user>/<path..>")]
@@ -179,7 +163,6 @@ fn register(storage: State<Storage>, data: Json<RegisterData>) -> Result<Status,
 }
 
 fn rocket(storage: Storage) -> rocket::Rocket {
-
     rocket::ignite()
         .mount("/", routes![register, get, put, delete, delete_path])
         .manage(storage)
@@ -193,23 +176,36 @@ fn storage() -> Storage {
 
 fn main() {
     let storage = storage();
+    let storage_ref_ctrlc = storage.clone();
+    let storage_ref_unwind = storage.clone();
 
-    ctrlc::set_handler(|| {
+    ctrlc::set_handler(move || {
       println!("Exiting...");
-      ()
+      storage_ref_ctrlc
+        .read()
+        .unwrap()
+        .write_to_fs();
+      exit(0)
     }).expect("Failed to set ctrlc handler.");
 
-    rocket(storage)
-        .launch();
-
-    println!("After launch");
+    panic::catch_unwind(|| {
+      rocket(storage)
+          .launch();
+    })
+    .unwrap_or_else(move |err| {
+      storage_ref_unwind
+        .read()
+        .unwrap()
+        .write_to_fs();
+      panic::resume_unwind(err)
+    })
 }
 
 #[cfg(test)]
 mod test {
     use crate::{
         rocket,
-        storage,
+        Storage,
         make_user,
         put_data,
         get_data,
@@ -219,7 +215,7 @@ mod test {
 
     #[test]
     fn storage_make_user() {
-        let storage = storage();
+        let storage = Storage::default();
         let username = "testuser".to_string();
         let user_id = from_username(username);
         assert_eq!(make_user(&storage, user_id), Ok(Status::Ok));
@@ -233,7 +229,7 @@ mod test {
 
     #[test]
     fn storage_make_user_conflict() {
-        let storage = storage();
+        let storage = Storage::default();
         let username = "testuser".to_string();
         let user_id = from_username(username);
         assert_eq!(make_user(&storage, user_id), Ok(Status::Ok));
@@ -242,7 +238,7 @@ mod test {
 
     #[test]
     fn storage_put_data() {
-        let storage = storage();
+        let storage = Storage::default();
         let username = "testuser".to_string();
         let user_id = from_username(username);
         let path = "some/path";
@@ -261,7 +257,7 @@ mod test {
 
     #[test]
     fn storage_put_data_not_found() {
-        let storage = storage();
+        let storage = Storage::default();
         let username = "testuser".to_string();
         let user_id = from_username(username);
         let path = "some/path";
@@ -273,7 +269,7 @@ mod test {
 
     #[test]
     fn storage_get_data() {
-        let storage = storage();
+        let storage = Storage::default();
         let username = "testuser".to_string();
         let user_id = from_username(username);
         let path = "some/path";
@@ -285,7 +281,7 @@ mod test {
 
     #[test]
     fn storage_get_data_user_not_found() {
-        let storage = storage();
+        let storage = Storage::default();
         let username = "testuser".to_string();
         let user_id = from_username(username);
         let path = "some/path";
@@ -294,7 +290,7 @@ mod test {
 
     #[test]
     fn storage_get_data_path_not_found() {
-        let storage = storage();
+        let storage = Storage::default();
         let username = "testuser".to_string();
         let user_id = from_username(username);
         let path = "some/path";
