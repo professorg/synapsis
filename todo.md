@@ -1,10 +1,10 @@
 Planned
 =======
 
-- [ ] **performance measurements: counting number of requests for different operations (graphing results)**
-- [ ] make output encryption size uniform: messages should not be distinguishable by encrypted length
+- [ ] performance measurements: counting number of requests for different operations (graphing results)
+- [ ] **make output encryption size uniform: messages should not be distinguishable by encrypted length**
 - [ ] timed messages that delete after some time (sort of; this is a convenience handled by the client)
-- [ ] **automatic generation of input and test data**
+- [ ] automatic generation of input and test data
 - [x] hide usernames: no usernames should be visible to server operator
 
 Not Planned
