@@ -25,13 +25,13 @@ struct Connection {
 }
 
 impl Connection {
-    fn new(address: &str, username: &str, password: &str, register: bool) -> Result<Self, reqwest::Error> {
+    fn new(client: &reqwest::blocking::Client, address: &str, username: &str, password: &str, register: bool) -> Result<Self, reqwest::Error> {
         let pub_keypair = gen_pub(username, password);
         let ver_keypair = gen_ver(username, password);
         let sk = gen_prv(username, password);
         let user_id = from_username(username.to_string());
 
-        let client = reqwest::blocking::Client::new();
+        //let client = reqwest::blocking::Client::new();
 
         if register {
             let data = RegisterData {
@@ -455,9 +455,10 @@ enum AfterSelectFriend {
     Delete,
 }
 
-fn cmd_client() {
+fn cmd_client(client: &reqwest::blocking::Client) {
     use ReadState::*;
 
+    //let client = reqwest::blocking::Client::new();
     let mut input = String::new();
     let mut servers: Vec<(String, Option<Connection>, Vec<String>)> = Vec::new();
     let mut state = ReadState::ServerList;
@@ -617,7 +618,7 @@ fn cmd_client() {
                     let confirm = rpassword::prompt_password_stdout("Confirm: ").unwrap();
 
                     if password == confirm {
-                        match Connection::new(&servers[i].0[..], &username[..], &password[..], true) {
+                        match Connection::new(&client, &servers[i].0[..], &username[..], &password[..], true) {
                             Ok(conn) => {
                                 servers[i].1 = Some(conn);
                                 FriendList(i)
@@ -632,7 +633,7 @@ fn cmd_client() {
                         ServerList
                     }
                 } else {
-                    match Connection::new(&servers[i].0[..], &username[..], &password[..], false) {
+                    match Connection::new(&client, &servers[i].0[..], &username[..], &password[..], false) {
                         Ok(conn) => {
                             servers[i].1 = Some(conn);
                             FriendList(i)
@@ -898,7 +899,8 @@ fn cmd_client() {
 }
 
 fn main() {
-    cmd_client();
+    let client = reqwest::blocking::Client::new();
+    cmd_client(&client);
 }
 
 
