@@ -27,6 +27,23 @@ pub struct UserVerification {
 pub struct MessageData {
     pub to: UserID,
     pub message: String,
+    pub is_continued: bool,
+}
+
+fn split_message(data: &MessageData, max_length: usize) -> Vec<MessageData> {
+  let s = &data.message[..];
+
+  s
+    .chars()
+    .collect::<Vec<char>>()
+    .chunks(max_length)
+    .map(|v| v.iter().collect::<String>())
+    .map(|s| MessageData {
+      to: data.to,
+      message: s,
+      is_continued: true,
+    })
+    .collect()
 }
 
 // for some reason serde can't handle u128
