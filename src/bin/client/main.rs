@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, iter::repeat};
 use ed25519_dalek::Signature;
 use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use synapsis::{
     crypto::{
         dec_prv, dec_pub, enc_prv, enc_pub, gen_prv, gen_pub, gen_ver, sign, PrivateKey, PublicKeyPair, VerifyKeyPair
-    }, network::{from_username, Message, MessageData, PutData, RegisterData, UserID, UserVerification, UID}
+    }, network::{from_username, Message, MessageData, PutData, RegisterData, split_message, UserID, UserVerification, UID}
 };
 use reqwest::blocking::{Client, Response};
 use std::{
@@ -13,6 +13,7 @@ use std::{
     time::{SystemTime, Duration, UNIX_EPOCH},
 };
 
+const MAX_LENGTH: usize = 255;
 
 struct Connection {
     address: String,
@@ -163,6 +164,12 @@ fn get_recv_message(conn: &Connection, from: UserID, uid: UID) -> Option<Message
     let message = dec_pub(&message_de.message[..], &conn.pkp);
     //println!("get_recv_message (dec): {:#?}", message);
     let message = message.ok()?;
+    if let [is_continued, len, rest @ ..] = &message[..] {
+      let len: usize = *len as usize;
+      let rest = &rest[..len];
+      unimplemented!();
+    } else {
+    }
     let message = String::from_utf8(message);
     //println!("get_recv_message (from_utf8): {:#?}", message);
     let message = message.ok()?;
@@ -197,7 +204,8 @@ fn get_pkp(conn: &Connection, to: UserID) -> Option<PublicKeyPair> {
 }
 
 fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
-    let head = get_data(&format!("{}/{}/{}/head", &conn.address[..], conn.user_id, data.to)[..], &conn.client)
+    let head =
+      get_data(&format!("{}/{}/{}/head", &conn.address[..], conn.user_id, data.to)[..], &conn.client)
         .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
         .and_then(|res|
             if res.status().is_success() {
@@ -224,8 +232,20 @@ fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::S
     let pkp =
       get_pkp(conn, data.to)
         .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let message = enc_pub(data.message.as_bytes(), &pkp);
-    let message_cc = enc_prv(data.message.as_bytes(), &conn.sk);
+    let is_continued = data.is_continued;
+    let msg = data.message.clone();
+    let len = msg.len();
+    let padding: Vec<u8> = repeat(0u8).take(MAX_LENGTH - len).collect();
+    //TODO: make this a function
+    let bytes =
+      &[
+        &[is_continued as u8][..],
+        &len.to_be_bytes()[..],
+        msg.as_bytes(),
+        &padding[..]
+      ].concat()[..];
+    let message = enc_pub(bytes, &pkp);
+    let message_cc = enc_prv(bytes, &conn.sk);
     let uid: UID = OsRng.next_u64();
     let timestamp = (SystemTime::now().duration_since(UNIX_EPOCH)).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
     let message = Message {
@@ -868,13 +888,20 @@ fn cmd_client() {
                     if !input.is_empty() {
                         let to = servers[i].2[j].clone();
                         let to = from_username(to);
-                        let res = send_chat_message(conn, &MessageData {
+                        let msg = &MessageData {
                             to,
                             message: input.clone(),
-                        });
-                        if res.is_err() {
-                            println!("Failed to send message. User not found.");
-                        }
+                            is_continued: false,
+                        };
+                        let parts = split_message(msg, MAX_LENGTH);
+                        parts
+                          .iter()
+                          .for_each(|m| {
+                            let res = send_chat_message(conn, m);
+                            if res.is_err() {
+                                println!("Failed to send message. User not found.");
+                            }
+                          });
                     }
                     let friend = servers[i].2[j].clone();
                     let friend = from_username(friend);

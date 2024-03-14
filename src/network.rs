@@ -30,12 +30,12 @@ pub struct MessageData {
     pub is_continued: bool,
 }
 
-fn split_message(data: &MessageData, max_length: usize) -> Vec<MessageData> {
+pub fn split_message(data: &MessageData, max_length: usize) -> Vec<MessageData> {
   let s = &data.message[..];
 
-  s
+  let mut parts = s
     .chars()
-    .collect::<Vec<char>>()
+    .collect::<Vec<_>>()
     .chunks(max_length)
     .map(|v| v.iter().collect::<String>())
     .map(|s| MessageData {
@@ -43,7 +43,9 @@ fn split_message(data: &MessageData, max_length: usize) -> Vec<MessageData> {
       message: s,
       is_continued: true,
     })
-    .collect()
+    .collect::<Vec<_>>();
+  parts[0].is_continued = false;
+  parts
 }
 
 // for some reason serde can't handle u128
