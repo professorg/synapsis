@@ -29,6 +29,43 @@ pub struct MessageData {
     pub message: String,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub enum MessageParts {
+  First(String),
+  Cons(String, Box<MessageParts>),
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct MessageDataParts {
+    pub to: UserID,
+    pub message: MessageParts,
+}
+
+//TODO: how do I use this?
+impl MessageParts {
+  fn new(message: String, max_size: usize) -> MessageParts {
+    message
+      .chars()
+      .collect::<Vec<_>>()
+      .chunks(max_size)
+      .fold(None, |acc, c| {
+        if let Some(x) = acc {
+          Some(MessageParts::Cons(c.iter().collect::<String>(), Box::new(x)))
+        } else {
+          Some(MessageParts::First(c.iter().collect::<String>()))
+        }
+      })
+      .unwrap()
+  }
+}
+
+pub fn to_message_parts(data: &MessageData, max_size: usize) -> MessageDataParts {
+  MessageDataParts {
+    to: data.to,
+    message: MessageParts::new(data.message.clone(), max_size),
+  }
+}
+
 // for some reason serde can't handle u128
 pub type UID = u64; //u128;
 pub type UserID = u64;
