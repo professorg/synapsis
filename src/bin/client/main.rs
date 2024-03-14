@@ -275,7 +275,7 @@ fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::S
 fn redact_chat_message(conn: &Connection, to: UserID, uid: UID) -> Result<(), String> {
   let message_orig: MessageDe = get_sent_message(conn, to, uid).ok_or("Not found")?;
   let message_redacted = MessageDe {
-    message: "[deleted message]".to_string(),
+    message: String::from("[deleted message]"),
     ..message_orig
   };
   let pkp =

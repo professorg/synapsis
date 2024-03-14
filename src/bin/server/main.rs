@@ -107,7 +107,7 @@ fn get(storage: State<Storage>, user: UserID, path: PathBuf) -> Result<String, S
 #[put("/<user>/<path..>", format = "application/json", data = "<data>")]
 fn put(storage: State<Storage>, user: UserID, path: PathBuf, data: Json<PutData>) -> Result<Status, Status> {
     let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
-    let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
+    let pk = get_data(storage.inner(), user.clone(), String::from("pkv"))?;
     let pk: VerifyKeyPair = serde_json::from_value(pk)
         .map_err(|_| Status::InternalServerError)?;
     let data_str = serde_json::ser::to_string(&data.data).map_err(|_| Status::InternalServerError)?;
@@ -120,7 +120,7 @@ fn put(storage: State<Storage>, user: UserID, path: PathBuf, data: Json<PutData>
 
 #[delete("/<user>", format = "application/json", data = "<data>")]
 fn delete(storage: State<Storage>, user: UserID, data: Json<UserVerification>) -> Result<Status, Status> {
-  let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
+  let pk = get_data(storage.inner(), user.clone(), String::from("pkv"))?;
   let pk: VerifyKeyPair = serde_json::from_value(pk)
     .map_err(|_| Status::InternalServerError)?;
   let nonce = &data.nonce;
@@ -138,7 +138,7 @@ fn delete(storage: State<Storage>, user: UserID, data: Json<UserVerification>) -
 
 #[delete("/<user>/<path..>", format = "application/json", data = "<signature>")]
 fn delete_path(storage: State<Storage>, user: UserID, path: PathBuf, signature: Json<Signature>) -> Result<Status, Status> {
-  let pk = get_data(storage.inner(), user.clone(), "pkv".to_string())?;
+  let pk = get_data(storage.inner(), user.clone(), String::from("pkv"))?;
   let pk: VerifyKeyPair = serde_json::from_value(pk)
     .map_err(|_| Status::InternalServerError)?;
   let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
@@ -158,8 +158,8 @@ fn register(storage: State<Storage>, data: Json<RegisterData>) -> Result<Status,
     let pkv = serde_json::value::to_value(&data.pkv)
         .map_err(|_| Status::InternalServerError)?;
     make_user(storage, data.user_id)
-        .and(put_data(storage, data.user_id, "pkp".to_string(), pkp))
-        .and(put_data(storage, data.user_id, "pkv".to_string(), pkv))
+        .and(put_data(storage, data.user_id, String::from("pkp"), pkp))
+        .and(put_data(storage, data.user_id, String::from("pkv"), pkv))
 }
 
 fn rocket(storage: Storage) -> rocket::Rocket {
@@ -216,7 +216,7 @@ mod test {
     #[test]
     fn storage_make_user() {
         let storage = Storage::default();
-        let username = "testuser".to_string();
+        let username = String::from("testuser");
         let user_id = from_username(username);
         assert_eq!(make_user(&storage, user_id), Ok(Status::Ok));
         assert!(
@@ -230,7 +230,7 @@ mod test {
     #[test]
     fn storage_make_user_conflict() {
         let storage = Storage::default();
-        let username = "testuser".to_string();
+        let username = String::from("testuser");
         let user_id = from_username(username);
         assert_eq!(make_user(&storage, user_id), Ok(Status::Ok));
         assert_eq!(make_user(&storage, user_id), Err(Status::Conflict));
@@ -239,7 +239,7 @@ mod test {
     #[test]
     fn storage_put_data() {
         let storage = Storage::default();
-        let username = "testuser".to_string();
+        let username = String::from("testuser");
         let user_id = from_username(username);
         let path = "some/path";
         let data = "some_data";
@@ -258,7 +258,7 @@ mod test {
     #[test]
     fn storage_put_data_not_found() {
         let storage = Storage::default();
-        let username = "testuser".to_string();
+        let username = String::from("testuser");
         let user_id = from_username(username);
         let path = "some/path";
         let data = "some_data";
@@ -270,7 +270,7 @@ mod test {
     #[test]
     fn storage_get_data() {
         let storage = Storage::default();
-        let username = "testuser".to_string();
+        let username = String::from("testuser");
         let user_id = from_username(username);
         let path = "some/path";
         let data = "some_data";
@@ -282,7 +282,7 @@ mod test {
     #[test]
     fn storage_get_data_user_not_found() {
         let storage = Storage::default();
-        let username = "testuser".to_string();
+        let username = String::from("testuser");
         let user_id = from_username(username);
         let path = "some/path";
         assert_eq!(get_data(&storage, user_id, path.to_string()), Err(Status::NotFound));
@@ -291,7 +291,7 @@ mod test {
     #[test]
     fn storage_get_data_path_not_found() {
         let storage = Storage::default();
-        let username = "testuser".to_string();
+        let username = String::from("testuser");
         let user_id = from_username(username);
         let path = "some/path";
         assert_eq!(make_user(&storage, user_id), Ok(Status::Ok));
