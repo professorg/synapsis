@@ -23,7 +23,7 @@ pub struct UserVerification {
     pub signature: Signature,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct MessageData {
     pub to: UserID,
     pub message: String,

@@ -27,6 +27,7 @@
               pkg-config
               openssl
               rustToolchain
+              python3
             ];
             RUST_SRC_PATH = "${rustPlatform.rustLibSrc}";
           };
