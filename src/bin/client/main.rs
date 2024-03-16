@@ -6,7 +6,7 @@ use synapsis::{
         dec_prv, dec_pub, enc_prv, enc_pub, gen_prv, gen_pub, gen_ver, sign, PrivateKey, PublicKeyPair, VerifyKeyPair
     }, network::{from_username, Message, MessageData, PutData, RegisterData, UserID, UserVerification, UID}
 };
-use reqwest::blocking::{Client, Response};
+use reqwest::{blocking::{Client, Response}, StatusCode};
 use std::{
     fs,
     io::{stdin, stdout, Write},
@@ -136,9 +136,11 @@ fn get_sent_message(conn: &Connection, to: UserID, uid: UID) -> Option<MessageDe
     let message = get_data(&format!("{}/{}/{}/{}", conn.address, conn.user_id, to, uid)[..], &conn.client).ok()?.text().ok()?;
     let message_de: Message = serde_json::from_str(&message[..]).ok()?;
     let message = dec_prv(&message_de.message_cc.1[..], &conn.sk, &message_de.message_cc.0[..]);
+    let message = String::from_utf8(message).ok()?;
+    let message = unpad(message);
     Some(MessageDe {
         from: conn.user_id,
-        message: String::from_utf8(message).ok()?,
+        message,
         timestamp: message_de.timestamp,
         prev: message_de.prev,
         uid: message_de.uid
@@ -166,6 +168,7 @@ fn get_recv_message(conn: &Connection, from: UserID, uid: UID) -> Option<Message
     let message = String::from_utf8(message);
     //println!("get_recv_message (from_utf8): {:#?}", message);
     let message = message.ok()?;
+    let message = unpad(message);
     Some(MessageDe {
         from,
         message,
@@ -196,7 +199,36 @@ fn get_pkp(conn: &Connection, to: UserID) -> Option<PublicKeyPair> {
   pkp
 }
 
+const MAX_LENGTH: usize = 250;
+const PADDED_LENGTH: usize = 256;
+
+fn split_message(data: &MessageData) -> Vec<MessageData> {
+  data.message
+    .chars()
+    .collect::<Vec<_>>()
+    .chunks(MAX_LENGTH)
+    .map(|c| MessageData { to: data.to, message: c.iter().collect() })
+    .collect()
+}
+
+fn unpad(msg: String) -> String {
+  String::from(msg.trim_end_matches('\0'))
+}
+
+fn pad(msg: String) -> String {
+  format!("{:\0<len$}", msg, len = PADDED_LENGTH)
+}
+
 fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
+    if data.message.len() > MAX_LENGTH {
+      split_message(data)
+        .iter()
+        .map(|m| send_chat_message(&conn, m))
+        .fold(Ok(StatusCode::OK), |a, res| a.and(res))?;
+    }
+
+    let msg_text = pad(data.message.clone());
+
     let head = get_data(&format!("{}/{}/{}/head", &conn.address[..], conn.user_id, data.to)[..], &conn.client)
         .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
         .and_then(|res|
@@ -224,8 +256,8 @@ fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::S
     let pkp =
       get_pkp(conn, data.to)
         .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let message = enc_pub(data.message.as_bytes(), &pkp);
-    let message_cc = enc_prv(data.message.as_bytes(), &conn.sk);
+    let message = enc_pub(msg_text.as_bytes(), &pkp);
+    let message_cc = enc_prv(msg_text.as_bytes(), &conn.sk);
     let uid: UID = OsRng.next_u64();
     let timestamp = (SystemTime::now().duration_since(UNIX_EPOCH)).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
     let message = Message {
