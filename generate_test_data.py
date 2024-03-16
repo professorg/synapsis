@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import random
 import string
+import sys
 from typing import Sequence
 
 ## Generate random ascii strings
@@ -14,9 +15,10 @@ USERNAME_SIZE = 20
 PASSWORD_SIZE = 20
 MSG_SIZE = 250
 
-def random_str(length) -> str:
+def random_str(length, spaces=False) -> str:
 # This contains a-z, A-Z, and spaces
-  valid_chars = string.ascii_letters + ' '
+  #valid_chars = string.ascii_letters + (' ' if spaces else '')
+  valid_chars = string.ascii_letters
 # Generate a string of 250 characters from valid characters
   output = ''.join(random.choice(valid_chars) for _ in range(length))
   return output
@@ -73,7 +75,7 @@ def gen_user() -> User:
 def gen_message(users: list[User]) -> Message:
   from_user = random.choice(users).username
   to_user = random.choice(users).username
-  msg = random_str(MSG_SIZE)
+  msg = random_str(MSG_SIZE, True)
   return Message(from_user, to_user, msg)
 
 def gen_data(num_users: int, num_messages: int) -> TestData:
@@ -81,16 +83,23 @@ def gen_data(num_users: int, num_messages: int) -> TestData:
   messages = [gen_message(users) for _ in range(num_messages)]
   return TestData(users, messages)
 
+# argv:
+#   test_setup: num_users, num_messages
+#   delete_users: num_delete_users
+#   test_setup_2: num_users_2, num_messages_2
+#   delete_chats: num_pairs
 def main():
 
+  print(sys.argv)
+  num_users, num_messages, num_delete_users, num_users_2, num_messages_2, num_pairs = map(int, sys.argv[1:])
+
   output_path = Path("./resources/test/test_setup.json")
-  test_data = gen_data(1000, 10000)
+  test_data = gen_data(num_users, num_messages)
   output_path.parent.mkdir(parents=True, exist_ok=True)
   with open(output_path, 'w') as f:
     f.write(test_data.ser())
 
   output_path = Path("./resources/test/delete_users.json")
-  num_delete_users = 100
   users_names = list(map(lambda u: u.username, test_data.users))
   random.shuffle(users_names)
   users = users_names[:num_delete_users]
@@ -98,12 +107,11 @@ def main():
     f.write(ser_list_str(users))
 
   output_path = Path("./resources/test/test_setup_2.json")
-  test_data = gen_data(100, 10000)
+  test_data = gen_data(num_users_2, num_messages_2)
   with open(output_path, 'w') as f:
     f.write(test_data.ser())
 
   output_path = Path("./resources/test/delete_chats.json")
-  num_pairs = 100
   user_pairs = list(map(lambda m: (m.from_user, m.to_user), test_data.messages))
   random.shuffle(user_pairs)
   user_pairs = user_pairs[:num_pairs]

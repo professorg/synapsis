@@ -184,32 +184,12 @@ fn count_register() {
   client.post(format!("{}/register", proxy_addr()))
     .json(&data)
     .send()
-    .or_else(|e| {
-      if let Some(_) = e.source() {
-        // retry
-        client.post(format!("{}/register", proxy_addr()))
-          .json(&data)
-          .send()
-      } else {
-        Err(e)
-      }
-    })
     .and_then(|r| r.error_for_status())
     .expect("Failed to register");
 
   let res = client
     .get(format!("{}/count", proxy_addr()))
     .send()
-    .or_else(|e| {
-      if let Some(_) = e.source() {
-        // retry
-        client
-          .get(format!("{}/count", proxy_addr()))
-          .send()
-      } else {
-        Err(e)
-      }
-    })
     .and_then(|r| r.error_for_status())
     .expect("Failed to get counters");
 
@@ -308,16 +288,6 @@ fn count_setup_performance() {
     client
       .get(format!("{}/count", proxy_addr()))
       .send()
-      .or_else(|e| {
-        if let Some(_) = e.source() {
-          // retry
-          client
-            .get(format!("{}/count", proxy_addr()))
-            .send()
-        } else {
-          Err(e)
-        }
-      })
       .expect("Failed to get counter")
       .text()
       .expect("Failed to get counter");
@@ -342,16 +312,6 @@ fn count_user_deletion_performance() {
   client
     .post(format!("{}/reset", proxy_addr()))
     .send()
-    .or_else(|e| {
-      if let Some(_) = e.source() {
-        // retry
-        client
-          .post(format!("{}/reset", proxy_addr()))
-          .send()
-      } else {
-        Err(e)
-      }
-    })
     .expect("Failed to reset counter");
 
   let delete_users = get_list_users(String::from("delete_users.json"))
@@ -367,16 +327,6 @@ fn count_user_deletion_performance() {
     client
       .get(format!("{}/count", proxy_addr()))
       .send()
-      .or_else(|e| {
-        if let Some(_) = e.source() {
-          // retry
-          client
-            .get(format!("{}/count", proxy_addr()))
-            .send()
-        } else {
-          Err(e)
-        }
-      })
       .expect("Failed to get counter")
       .text()
       .expect("Failed to get counter");
@@ -401,16 +351,6 @@ fn count_chat_deletion_performance() {
   client
     .post(format!("{}/reset", proxy_addr()))
     .send()
-    .or_else(|e| {
-      if let Some(_) = e.source() {
-        // retry
-        client
-          .post(format!("{}/reset", proxy_addr()))
-          .send()
-      } else {
-        Err(e)
-      }
-    })
     .expect("Failed to reset counter");
 
   let delete_users = get_list_user_pairs(String::from("delete_chats.json"))
@@ -426,16 +366,6 @@ fn count_chat_deletion_performance() {
     client
       .get(format!("{}/count", proxy_addr()))
       .send()
-      .or_else(|e| {
-        if let Some(_) = e.source() {
-          // retry
-          client
-            .get(format!("{}/count", proxy_addr()))
-            .send()
-        } else {
-          Err(e)
-        }
-      })
       .expect("Failed to get counter")
       .text()
       .expect("Failed to get counter");
@@ -462,17 +392,9 @@ fn get(client: State<Client>, ctr: State<Arc<RwLock<RequestCounters>>>, user: Us
   let res =
     client
       .get(format!("{}/{}/{}", base_addr(), user, path.to_string_lossy()))
-      .send()
-      .or_else(|e| {
-        if let Some(_) = e.source() {
-          // retry
-          client
-            .get(format!("{}/{}/{}", base_addr(), user, path.to_string_lossy()))
-            .send()
-        } else {
-          Err(e)
-        }
-      });
+      .send();
+
+  //panic!("{:?}", res);
 
   res
     .map_err(translate_error)?
@@ -488,17 +410,7 @@ fn put(client: State<Client>, ctr: State<Arc<RwLock<RequestCounters>>>, user: Us
   let res = 
     client.put(format!("{}/{}/{}", base_addr(), user, path.to_string_lossy()))
       .json(&data.0)
-      .send()
-      .or_else(|e| {
-        if let Some(_) = e.source() {
-          // retry
-          client.put(format!("{}/{}/{}", base_addr(), user, path.to_string_lossy()))
-            .json(&data.0)
-            .send()
-        } else {
-          Err(e)
-        }
-      });
+      .send();
 
   let status =
     res
@@ -516,17 +428,7 @@ fn delete(client: State<Client>, ctr: State<Arc<RwLock<RequestCounters>>>, user:
   let res = 
     client.delete(format!("{}/{}", base_addr(), user))
       .json(&data.0)
-      .send()
-      .or_else(|e| {
-        if let Some(_) = e.source() {
-          // retry
-          client.delete(format!("{}/{}", base_addr(), user))
-            .json(&data.0)
-            .send()
-        } else {
-          Err(e)
-        }
-      });
+      .send();
 
   let status =
     res
@@ -544,17 +446,7 @@ fn delete_path(client: State<Client>, ctr: State<Arc<RwLock<RequestCounters>>>, 
   let res = 
     client.delete(format!("{}/{}/{}", base_addr(), user, path.to_string_lossy()))
       .json(&signature.0)
-      .send()
-      .or_else(|e| {
-        if let Some(_) = e.source() {
-          // retry
-          client.delete(format!("{}/{}/{}", base_addr(), user, path.to_string_lossy()))
-            .json(&signature.0)
-            .send()
-        } else {
-          Err(e)
-        }
-      });
+      .send();
 
   let status =
     res
@@ -572,17 +464,7 @@ fn register(client: State<Client>, ctr: State<Arc<RwLock<RequestCounters>>>, dat
   let res = 
     client.post(format!("{}/register", base_addr()))
       .json(&data.0)
-      .send()
-      .or_else(|e| {
-        if let Some(_) = e.source() {
-          // retry
-          client.post(format!("{}/register", base_addr()))
-            .json(&data.0)
-            .send()
-        } else {
-          Err(e)
-        }
-      });
+      .send();
 
   let status =
     res

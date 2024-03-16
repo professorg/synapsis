@@ -94,6 +94,7 @@ fn get_data(storage: &Storage, user: UserID, path: String) -> Result<Value, Stat
 fn get(storage: State<Storage>, user: UserID, path: PathBuf) -> Result<String, Status> {
     let path = path.to_str().ok_or(Status::InternalServerError)?.to_string();
     let res = get_data(storage.inner(), user, path);
+    //panic!("{:?}", res);
     res
       .and_then(|x|
         serde_json::ser::to_string(&x)

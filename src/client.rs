@@ -210,26 +210,29 @@ pub fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwes
     let head = get_data(&format!("{}/{}/{}/head", &conn.address[..], conn.user_id, data.to)[..], &conn.client)
         //.map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
         .map_err(|e| panic!("{:?}", e))
-        .and_then(|res|
+        .and_then(|res| {
+            println!("{:?}", &res);
             if res.status().is_success() {
                 Ok(Some(res.text()))
             } else if res.status() == reqwest::StatusCode::NOT_FOUND {
                 Ok(None)
             } else {
-                Err(res.status())
-            })?;
+              Err(res.status())
+            }
+        })?;
     let head = match head {
         Some(Ok(a)) => Some(a),
         //Some(Err(_)) => return Err(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
         Some(Err(e)) => panic!("{:?}", e),
         None => None,
     };
+    let check = head.clone();
     let head = head.and_then(|uid|
         Some(serde_json::from_str::<UID>(&uid[..])));
     let head = match head {
         Some(Ok(a)) => Some(a),
         //Some(Err(_)) => return Err(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
-        Some(Err(e)) => panic!("{:?}", e),
+        Some(Err(e)) => panic!("{:?}\ncheck: {:?}", e, check),
         None => None,
     };
 
@@ -377,16 +380,6 @@ pub fn register_keys(address: &str, client: &Client, data: RegisterData) -> reqw
   client.post(address)
     .json(&data)
     .send()
-    .or_else(|e| {
-      if let Some(_) = e.source() {
-        // retry
-        client.post(address)
-          .json(&data)
-          .send()
-      } else {
-        Err(e)
-      }
-    })
 }
 
 pub fn delete_user(conn: &Connection) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
@@ -431,62 +424,23 @@ fn put_data(address: &str, client: &Client, data: PutData) -> reqwest::Result<Re
     client.put(address)
         .json(&data)
         .send()
-        .or_else(|e| {
-          if let Some(_) = e.source() {
-            // retry
-            client.put(address)
-                .json(&data)
-                .send()
-          } else {
-            Err(e)
-          }
-        })
 }
 
 fn get_data(address: &str, client: &Client) -> reqwest::Result<Response> {
     client.get(address)
         .send()
-        .or_else(|e| {
-          if let Some(_) = e.source() {
-            // retry
-            client.get(address)
-                .send()
-          } else {
-            Err(e)
-          }
-        })
 }
 
 fn delete_data(address: &str, client: &Client, data: UserVerification) -> reqwest::Result<Response> {
     client.delete(address)
         .json(&data)
         .send()
-        .or_else(|e| {
-          if let Some(_) = e.source() {
-            // retry
-            client.delete(address)
-                .json(&data)
-                .send()
-          } else {
-            Err(e)
-          }
-        })
 }
 
 fn delete_path(address: &str, client: &Client, data: Signature) -> reqwest::Result<Response> {
     client.delete(address)
         .json(&data)
         .send()
-        .or_else(|e| {
-          if let Some(_) = e.source() {
-            // retry
-            client.delete(address)
-                .json(&data)
-                .send()
-          } else {
-            Err(e)
-          }
-        })
 }
 
 enum ReadState {
