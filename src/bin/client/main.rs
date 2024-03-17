@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use chrono::{NaiveDateTime, TimeDelta, Utc};
+use duration_string::DurationString;
 use ed25519_dalek::Signature;
 use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+use serde::{Deserialize, Serialize};
 use synapsis::{
     crypto::{
         dec_prv, dec_pub, enc_prv, enc_pub, gen_prv, gen_pub, gen_ver, sign, PrivateKey, PublicKeyPair, VerifyKeyPair
@@ -196,7 +199,7 @@ fn get_pkp(conn: &Connection, to: UserID) -> Option<PublicKeyPair> {
   pkp
 }
 
-fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
+fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<UID, reqwest::StatusCode> {
     let head = get_data(&format!("{}/{}/{}/head", &conn.address[..], conn.user_id, data.to)[..], &conn.client)
         .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
         .and_then(|res|
@@ -269,7 +272,8 @@ fn send_chat_message(conn: &Connection, data: &MessageData) -> Result<reqwest::S
                 Ok(res.status())
             } else {
                 Err(res.status())
-            })
+            })?;
+    Ok(uid)
 }
 
 fn redact_chat_message(conn: &Connection, to: UserID, uid: UID) -> Result<(), String> {
@@ -328,6 +332,17 @@ fn get_friends(conn: &Connection) -> Option<Vec<String>> {
   friends
 }
 
+fn get_to_delete(conn: &Connection) -> Option<Vec<TimedMessage>> {
+  let response = get_data(&format!("{}/{}/to_delete", &conn.address[..], conn.user_id), &conn.client);
+  let txt = response.ok()?.text().ok()?;
+  let txt_dec: (Vec<u8>, Vec<u8>) = serde_json::from_str(&txt[..]).ok()?;
+  let (nonce, to_delete_enc) = txt_dec;
+  let to_delete_bytes = dec_prv(&to_delete_enc[..], &conn.sk, &nonce[..]);
+  let to_delete_str = String::from_utf8(to_delete_bytes).ok()?;
+  let to_delete = serde_json::from_str(&to_delete_str).ok()?;
+  to_delete
+}
+
 fn put_friends(conn: &Connection, friends: Vec<String>) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
   let friends_str = serde_json::ser::to_string(&friends).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
   let friends_enc = enc_prv(friends_str.as_bytes(), &conn.sk);
@@ -340,6 +355,27 @@ fn put_friends(conn: &Connection, friends: Vec<String>) -> Result<reqwest::Statu
     signature,
   };
   put_data(&format!("{}/{}/friends", &conn.address[..], conn.user_id), &conn.client, data)
+    .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+    .and_then(|res|
+        if res.status().is_success() {
+            Ok(res.status())
+        } else {
+            Err(res.status())
+        })
+}
+
+fn put_to_delete(conn: &Connection, to_delete: Vec<TimedMessage>) -> Result<reqwest::StatusCode, reqwest::StatusCode> {
+  let to_delete_str = serde_json::ser::to_string(&to_delete).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+  let to_delete_enc = enc_prv(to_delete_str.as_bytes(), &conn.sk);
+  let to_delete_enc_val = serde_json::json!(&to_delete_enc);
+  let to_delete_enc_str = serde_json::ser::to_string(&to_delete_enc_val).map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+  let signature = sign(&to_delete_enc_str[..].as_bytes()[..], &conn.pkv)
+        .ok_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)?;
+  let data = PutData {
+    data: to_delete_enc_val,
+    signature,
+  };
+  put_data(&format!("{}/{}/to_delete", &conn.address[..], conn.user_id), &conn.client, data)
     .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
     .and_then(|res|
         if res.status().is_success() {
@@ -455,14 +491,71 @@ enum AfterSelectFriend {
     Delete,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct TimedMessage {
+  to: UserID,
+  uid: UID,
+  delete_after: NaiveDateTime,
+}
+
+struct ServerInfo {
+  address: String,
+  conn: Option<ServerConnection>,
+}
+
+impl ServerInfo {
+  fn new(address: String) -> Self {
+    Self {
+      address,
+      conn: None,
+    }
+  }
+}
+
+struct ServerConnection {
+  conn: Connection,
+  friends: Vec<String>,
+  to_delete: Vec<TimedMessage>,
+}
+
+impl ServerConnection {
+  fn new(conn: Connection) -> Self {
+    ServerConnection {
+      conn,
+      friends: Vec::new(),
+      to_delete: Vec::new(),
+    }
+  }
+}
+
 fn cmd_client() {
     use ReadState::*;
 
     let mut input = String::new();
-    let mut servers: Vec<(String, Option<Connection>, Vec<String>)> = Vec::new();
+    let mut servers: Vec<ServerInfo> = Vec::new();
     let mut state = ReadState::ServerList;
     loop {
         input.clear();
+
+        // Delete expired messages after any action
+        let now = Utc::now().naive_utc();
+        servers
+          .iter_mut()
+          .flat_map(|s| s.conn.as_mut())
+          .for_each(|server_conn| {
+            let to_delete: &mut Vec<_> = server_conn.to_delete.as_mut();
+            let conn = &server_conn.conn;
+            to_delete
+              .retain(|m| {
+                let TimedMessage{ to, uid, delete_after } = m;
+                !(
+                  now >= *delete_after &&
+                  redact_chat_message(conn, *to, *uid).is_ok()
+                )
+              });
+            let _ = put_to_delete(conn, to_delete.to_owned());
+          });
+
         state = match state {
             ServerList => {
                 println!("add: Add server");
@@ -502,8 +595,8 @@ fn cmd_client() {
                 }
             }
             Save(file) => {
-                let servers: Vec<(String, Vec<String>)> = servers.iter()
-                    .map(|server| (server.0.clone(), server.2.clone()))
+                let servers: Vec<String> = servers.iter()
+                    .map(|server| server.address.clone())
                     .collect();
                 let servers = serde_json::to_string(&servers);
                 match servers {
@@ -522,13 +615,14 @@ fn cmd_client() {
                 let servers_str = fs::read_to_string(file); 
                 match servers_str {
                     Ok(servers_str) => {
-                        let servers_de  = serde_json::from_str::<Vec<(String, Vec<String>)>>(&servers_str[..]);
+                        let servers_de  = serde_json::from_str::<Vec<String>>(&servers_str[..]);
                         match servers_de {
                             Ok(servers_de) => {
-                                let mut servers_ld: Vec<(String, Option<Connection>, Vec<String>)> = servers_de.iter().cloned()
-                                    .map(|(s, f)| (s, None, f))
-                                    .collect();
-                                servers.append(&mut servers_ld);
+                                let servers_ld =
+                                  servers_de
+                                    .iter()
+                                    .map(|s| ServerInfo::new(s.clone()));
+                                servers.extend(servers_ld);
                             }
                             Err(_) => {
                                 println!("Failed to load server list");
@@ -546,16 +640,16 @@ fn cmd_client() {
                 stdout().flush().unwrap();
                 stdin().read_line(&mut input).unwrap();
                 input.pop();
-                servers.push((input.clone(), None, Vec::new()));
+                servers.push(ServerInfo::new(input.clone()));
                 ServerList
             }
             SelectServer(next_state) => {
                 println!("Select a server:");
                 for (i, server) in servers.iter().enumerate() {
-                    if let Some(conn) = &server.1 {
-                        println!("{:3} {} ({})", i + 1, server.0, conn.username);
+                    if let Some(conn) = &server.conn {
+                        println!("{:3} {} ({})", i + 1, server.address, conn.conn.username);
                     } else {
-                        println!("{:3} {}", i + 1, server.0);
+                        println!("{:3} {}", i + 1, server.address);
                     }
                 }
                 print!("> ");
@@ -617,9 +711,9 @@ fn cmd_client() {
                     let confirm = rpassword::prompt_password_stdout("Confirm: ").unwrap();
 
                     if password == confirm {
-                        match Connection::new(&servers[i].0[..], &username[..], &password[..], true) {
+                        match Connection::new(&servers[i].address[..], &username[..], &password[..], true) {
                             Ok(conn) => {
-                                servers[i].1 = Some(conn);
+                                servers[i].conn = Some(ServerConnection::new(conn));
                                 FriendList(i)
                             }
                             Err(_) => {
@@ -632,9 +726,16 @@ fn cmd_client() {
                         ServerList
                     }
                 } else {
-                    match Connection::new(&servers[i].0[..], &username[..], &password[..], false) {
+                    match Connection::new(&servers[i].address[..], &username[..], &password[..], false) {
                         Ok(conn) => {
-                            servers[i].1 = Some(conn);
+                            servers[i].conn = Some(ServerConnection::new(conn));
+                            let server_conn = servers[i].conn.as_mut().unwrap();
+                            let conn = &server_conn.conn;
+
+                            let to_delete: &mut Vec<TimedMessage> = server_conn.to_delete.as_mut();
+                            let to_delete_remote = get_to_delete(conn).unwrap_or(vec![]);
+                            to_delete.extend(to_delete_remote);
+
                             FriendList(i)
                         }
                         Err(_) => {
@@ -689,13 +790,15 @@ fn cmd_client() {
                 }
             }
             AddFriend(i) => {
+                let server_conn = servers[i].conn.as_mut().unwrap();
+                let friends: &mut Vec<String> = server_conn.friends.as_mut();
+                let conn = &server_conn.conn;
                 print!("Friend username: ");
                 stdout().flush().unwrap();
                 stdin().read_line(&mut input).unwrap();
                 input.pop();
                 let friend = input.clone();
-                servers[i].2.push(friend.clone());
-                let conn = servers[i].1.as_ref().unwrap();
+                friends.push(friend.clone());
                 let mut friends = get_friends(conn).unwrap_or(vec![]);
                 if !friends.contains(&friend) {
                   friends.push(friend.clone());
@@ -706,8 +809,10 @@ fn cmd_client() {
                 FriendList(i)
             }
             SelectFriend(i, next_state) => {
+                let server_conn = servers[i].conn.as_ref().unwrap();
+                let friends = &server_conn.friends;
                 println!("Select a friend:");
-                for (j, friend) in servers[i].2.iter().enumerate() {
+                for (j, friend) in friends.iter().enumerate() {
                     println!("{:3} {}", j + 1, friend);
                 }
                 print!("> ");
@@ -717,7 +822,7 @@ fn cmd_client() {
                 let index = match input.split_whitespace().next() {
                     Some(j) => match j.parse::<usize>() {
                         Ok(j) => {
-                            if (1..=servers[i].2.len()).contains(&j) {
+                            if (1..=friends.len()).contains(&j) {
                                 Some(j)
                             } else {
                                 println!("Could not select friend: index out of range");
@@ -739,9 +844,10 @@ fn cmd_client() {
                     (Some(j), AfterSelectFriend::Open) => {
                         println!("/exit: exit to friends list");
                         println!("/quit: quit Synapsis");
+                        println!("/delete:<duration> <message>: Send a message that will delete after some duration");
                         println!("Leave blank to get new messages.");
                         println!("All other inputs are sent as messages.");
-                        let username = servers[i].2[j - 1].clone();
+                        let username = friends[j - 1].clone();
                         Chat(i, j - 1, username, None)
                     },
                     (Some(j), AfterSelectFriend::Redact) => RedactChat(i, j - 1),
@@ -750,6 +856,8 @@ fn cmd_client() {
                 }
             }
             RemoveFriend(i, j) => {
+                let server_conn = servers[i].conn.as_mut().unwrap();
+                let friends: &mut Vec<String> = server_conn.friends.as_mut();
                 print!("Are you sure you want to remove the friend? (y/n) ");
                 stdout().flush().unwrap();
                 stdin().read_line(&mut input).unwrap();
@@ -757,33 +865,38 @@ fn cmd_client() {
                 let mut chars = input.chars();
                 match chars.next() {
                     Some('y') => {
-                        servers[i].2.remove(j);
+                        friends.remove(j);
                     }
                     _ => (),
                 };
                 FriendList(i)
             }
             GetFriends(i) => {
-              let conn = servers[i].1.as_ref().unwrap();
-              let friends = get_friends(conn).unwrap_or(vec![]);
-              servers[i].2.clear();
-              servers[i].2.extend(friends);
+              let server_conn = servers[i].conn.as_mut().unwrap();
+              let conn = &server_conn.conn;
+              let friends: &mut Vec<String> = server_conn.friends.as_mut();
+              let friends_remote = get_friends(conn).unwrap_or(vec![]);
+              friends.clear();
+              friends.extend(friends_remote);
+              
               FriendList(i)
             }
             DownloadChats(i) => {
+              let server_conn = servers[i].conn.as_ref().unwrap();
+              let conn = &server_conn.conn;
+              let friends = &server_conn.friends;
               print!("Filename: ");
               stdout().flush().unwrap();
               stdin().read_line(&mut input).unwrap();
               input.pop();
-              let conn = servers[i].1.as_ref();
               let file = input.clone();
-              let friends = servers[i].2.iter();
               let friends_messages =
                 friends
+                  .iter()
                   .map(|x| from_username(x.clone()))
                   .map(|friend| (
                     friend.clone(),
-                    Messages::new(&conn.unwrap(), friend.clone(), None)));
+                    Messages::new(conn, friend.clone(), None)));
               let chats = 
                 friends_messages
                   .map(|(friend, messages)|
@@ -815,12 +928,13 @@ fn cmd_client() {
               FriendList(i)
             }
             RedactChat(i, j) => {
-              let conn = servers[i].1.as_ref().unwrap();
-              let friends = &servers[i].2;
+              let server_conn = servers[i].conn.as_ref().unwrap();
+              let conn = &server_conn.conn;
+              let friends = &server_conn.friends;
               let friend = friends[j].clone();
               let friend = from_username(friend);
               //TODO: Use separate iterator for only sent messages
-              let messages = Messages::new(&conn, friend, None); 
+              let messages = Messages::new(conn, friend, None); 
               for message in messages {
                 if message.from == conn.user_id {
                   let uid = message.uid;
@@ -833,8 +947,9 @@ fn cmd_client() {
               FriendList(i) 
             }
             DeleteChat(i, j) => {
-              let conn = servers[i].1.as_ref().unwrap();
-              let friends = &servers[i].2;
+              let server_conn = servers[i].conn.as_ref().unwrap();
+              let conn = &server_conn.conn;
+              let friends = &server_conn.friends;
               let friend = friends[j].clone();
               let friend = from_username(friend);
               let res = delete_chat(conn, friend);
@@ -845,7 +960,8 @@ fn cmd_client() {
               FriendList(i) 
             }
             DeleteAccount(i) => {
-              let conn = servers[i].1.as_ref().unwrap();
+              let server_conn = servers[i].conn.as_ref().unwrap();
+              let conn = &server_conn.conn;
               let res = delete_user(conn);
               if let Err(msg) = res {
                 println!("Error while deleting your account: {}", msg);
@@ -853,7 +969,9 @@ fn cmd_client() {
               ServerList
             }
             Chat(i, j, username, until) => {
-                let conn = servers[i].1.as_ref().unwrap();
+                let server_conn = servers[i].conn.as_mut().unwrap();
+                let conn = &server_conn.conn;
+                let friends = &server_conn.friends;
                 let mut last: Option<UID> = until;
                 print!("> ");
                 stdout().flush().unwrap();
@@ -861,36 +979,60 @@ fn cmd_client() {
                 stdin().read_line(&mut input).unwrap();
                 input.pop();
                 if input.eq_ignore_ascii_case("/exit") {
-                    FriendList(i)
+                  FriendList(i)
                 } else if input.eq_ignore_ascii_case("/quit") {
-                    break;
+                  break;
                 } else {
-                    if !input.is_empty() {
-                        let to = servers[i].2[j].clone();
-                        let to = from_username(to);
-                        let res = send_chat_message(conn, &MessageData {
-                            to,
-                            message: input.clone(),
-                        });
-                        if res.is_err() {
-                            println!("Failed to send message. User not found.");
+                  let (timeout, message) =
+                    if let Some(s) = input.clone().strip_prefix("/delete:") {
+                      if let Some((duration_str, rest)) = s.split_once(' ') {
+                        if let Ok(duration_str) = DurationString::from_string(String::from(duration_str)) {
+                          let timeout = Duration::from(duration_str);
+                          (Some(timeout), String::from(rest))
+                        } else {
+                          println!("Invalid duration: {}", duration_str);
+                          (None, String::from(""))
                         }
-                    }
-                    let friend = servers[i].2[j].clone();
-                    let friend = from_username(friend);
-                    let messages = Messages::new(&servers[i].1.as_ref().unwrap(), friend, until);
-                    for msg in messages.collect::<Vec<_>>().iter().rev() {
-                        let from_id = msg.from;
-                        let from_username =
-                          if from_id == conn.user_id {
-                            conn.username.clone()
-                          } else {
-                            username.clone()
-                          };
-                        last = Some(msg.uid);
-                        println!("{}: {}", from_username, msg.message);
-                    }
-                    Chat(i, j, username, last)
+                      } else {
+                        (None, String::from(""))
+                      }
+                    } else {
+                      (None, input.clone())
+                    };
+                  let friend = friends[j].clone();
+                  let friend = from_username(friend);
+                  if !message.is_empty() {
+                      let to = friend;
+                      let res = send_chat_message(conn, &MessageData {
+                          to,
+                          message: message.clone(),
+                      });
+                      if let Ok(uid) = res {
+                        if let Some(t) = timeout {
+                          let now = Utc::now().naive_utc();
+                          let td = TimeDelta::new(t.as_secs() as i64, t.subsec_nanos()).unwrap();
+                          server_conn.to_delete.push(TimedMessage {
+                            to,
+                            uid,
+                            delete_after: now + td,
+                          });
+                        }
+                      } else {
+                          println!("Failed to send message. User not found.");
+                      }                   }
+                  let messages = Messages::new(conn, friend, until);
+                  for msg in messages.collect::<Vec<_>>().iter().rev() {
+                      let from_id = msg.from;
+                      let from_username =
+                        if from_id == conn.user_id {
+                          conn.username.clone()
+                        } else {
+                          username.clone()
+                        };
+                      last = Some(msg.uid);
+                      println!("{}: {}", from_username, msg.message);
+                  }
+                  Chat(i, j, username, last)
                 }
             }
         };
