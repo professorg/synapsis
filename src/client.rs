@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error};
+use std::collections::HashMap;
 use ed25519_dalek::Signature;
 use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use crate::{

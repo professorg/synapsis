@@ -1,7 +1,7 @@
 #![feature(decl_macro)]
 
 use core::time;
-use std::{collections::HashMap, error::Error, path::PathBuf, sync::{Arc, RwLock}, thread};
+use std::{collections::HashMap, path::PathBuf, sync::{Arc, RwLock}, thread};
 
 use ed25519_dalek::Signature;
 use reqwest::blocking::Client;
