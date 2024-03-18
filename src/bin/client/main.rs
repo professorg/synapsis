@@ -85,6 +85,18 @@ impl<'a> Messages<'a> {
             until,
         }
     }
+
+    fn from_uids(conn: &'a Connection, with: UserID, sent: Option<UID>, recv: Option<UID>, until: Option<UID>) -> Self {
+      let sent = sent.and_then(|sent| get_sent_message(conn, with, sent));
+      let recv = recv.and_then(|recv| get_recv_message(conn, with, recv));
+      Messages {
+        conn,
+        with,
+        sent,
+        recv,
+        until,
+      }
+    }
 }
 
 impl<'a> Iterator for Messages<'a> {
@@ -321,6 +333,64 @@ fn delete_chat_message_simple(conn: &Connection, to: UserID, uid: UID) -> Result
   Ok(())
 }
 
+fn delete_chat_message(conn: &Connection, to: UserID, uid: UID, relink_uid: Option<UID>) -> Result<(), String> {
+  let message = get_sent_message(conn, to, uid).ok_or("Failed to get message for deletion")?;
+  let relink_message = relink_uid.and_then(|uid| get_sent_message(conn, to, uid));
+  let prev_message = message.prev;
+
+  if let Some(relink_message) = relink_message {
+
+    // Re-link
+    let message_replaced = MessageDe {
+      prev: prev_message,
+      ..relink_message
+    };
+
+    let pkp =
+      get_pkp(conn, to)
+        .ok_or("Failed to get public key")?;
+    let message = enc_pub(message_replaced.message.as_bytes(), &pkp);
+    let message_cc = enc_prv(message_replaced.message.as_bytes(), &conn.sk);
+    let uid: UID = message_replaced.uid;
+    let timestamp = message_replaced.timestamp;
+    let prev = message_replaced.prev;
+    let message = Message {
+            message,
+            message_cc,
+            timestamp,
+            prev,
+            uid,
+        };
+    let message_val = serde_json::json!(message);
+    let message_str = serde_json::ser::to_string(&message_val).map_err(|_| "Failed to serialize message")?;
+    let signature = sign(&message_str.as_bytes()[..], &conn.pkv)
+        .ok_or("Failed to sign message")?;
+
+    let msg_data = PutData {
+        data: message_val,
+        signature,
+    };
+    put_data(&format!("{}/{}/{}/{}", &conn.address, conn.user_id, to, uid)[..], &conn.client, msg_data)
+      .map_err(|_| "Failed to update redacted message")?;
+
+  } else if let Some(prev_message) = prev_message {
+
+    // Update head
+    let uid_val = serde_json::json!(prev_message);
+    let uid_str = serde_json::ser::to_string(&uid_val).map_err(|_| "Failed to serialize head uid")?;
+    let signature = sign(&uid_str.as_bytes()[..], &conn.pkv)
+        .ok_or("Failed to sign head")?;
+    let uid_data = PutData {
+        data: uid_val,
+        signature,
+    };
+    put_data(&format!("{}/{}/{}/head", &conn.address, conn.user_id, to)[..], &conn.client, uid_data)
+        .map_err(|_| "Failed to update head")?;
+  }
+
+  delete_chat_message_simple(conn, to, uid)
+}
+
 fn get_friends(conn: &Connection) -> Option<Vec<String>> {
   let response = get_data(&format!("{}/{}/friends", &conn.address[..], conn.user_id), &conn.client);
   let txt = response.ok()?.text().ok()?;
@@ -406,7 +476,7 @@ fn delete_user(conn: &Connection) -> Result<reqwest::StatusCode, reqwest::Status
     nonce: reg_data,
     signature,
   };
-  delete_data(&format!("{}/{}", &conn.address[..], user.clone()), &conn.client, verif)
+  delete_data(&format!("{}/{}", &conn.address[..], user_id), &conn.client, verif)
     .map_err(|_| reqwest::StatusCode::INTERNAL_SERVER_ERROR)
     .and_then(|res|
         if res.status().is_success() {
@@ -471,6 +541,9 @@ enum ReadState {
     DeleteChat(usize, usize),
     DeleteAccount(usize),
     Chat(usize, usize, String, Option<UID>),
+    SelectMessage(usize, usize, String, Option<UID>, Option<UID>, AfterSelectMessage),
+    RedactMessage(usize, usize, String, UID),
+    DeleteMessage(usize, usize, String, UID, Option<UID>),
 }
 
 enum AfterSelectFile {
@@ -487,6 +560,11 @@ enum AfterSelectServer {
 enum AfterSelectFriend {
     Remove,
     Open,
+    Redact,
+    Delete,
+}
+
+enum AfterSelectMessage {
     Redact,
     Delete,
 }
@@ -844,7 +922,9 @@ fn cmd_client() {
                     (Some(j), AfterSelectFriend::Open) => {
                         println!("/exit: exit to friends list");
                         println!("/quit: quit Synapsis");
-                        println!("/delete:<duration> <message>: Send a message that will delete after some duration");
+                        println!("/timed:<duration> <message>: Send a message that will delete after some duration");
+                        println!("/delete: Delete a message");
+                        println!("/redact: Redact a message");
                         println!("Leave blank to get new messages.");
                         println!("All other inputs are sent as messages.");
                         let username = friends[j - 1].clone();
@@ -960,13 +1040,16 @@ fn cmd_client() {
               FriendList(i) 
             }
             DeleteAccount(i) => {
-              let server_conn = servers[i].conn.as_ref().unwrap();
+              let server_conn = servers[i].conn.as_mut().unwrap();
               let conn = &server_conn.conn;
               let res = delete_user(conn);
               if let Err(msg) = res {
                 println!("Error while deleting your account: {}", msg);
+                FriendList(i)
+              } else {
+                servers[i].conn = None;
+                ServerList
               }
-              ServerList
             }
             Chat(i, j, username, until) => {
                 let server_conn = servers[i].conn.as_mut().unwrap();
@@ -982,9 +1065,13 @@ fn cmd_client() {
                   FriendList(i)
                 } else if input.eq_ignore_ascii_case("/quit") {
                   break;
+                } else if input.eq_ignore_ascii_case("/delete") {
+                  SelectMessage(i, j, username, None, None, AfterSelectMessage::Delete)
+                } else if input.eq_ignore_ascii_case("/redact") {
+                  SelectMessage(i, j, username, None, None, AfterSelectMessage::Redact)
                 } else {
                   let (timeout, message) =
-                    if let Some(s) = input.clone().strip_prefix("/delete:") {
+                    if let Some(s) = input.clone().strip_prefix("/timed:") {
                       if let Some((duration_str, rest)) = s.split_once(' ') {
                         if let Ok(duration_str) = DurationString::from_string(String::from(duration_str)) {
                           let timeout = Duration::from(duration_str);
@@ -1034,6 +1121,151 @@ fn cmd_client() {
                   }
                   Chat(i, j, username, last)
                 }
+            }
+            SelectMessage(i, j, username, sent, recv, next_state) => {
+                let server_conn = servers[i].conn.as_ref().unwrap();
+                let conn = &server_conn.conn;
+                let friends = &server_conn.friends;
+                let friend = friends[j].clone();
+                let friend = from_username(friend);
+                let messages = 
+                  if sent.is_none() && recv.is_none() {
+                    println!("Type the beginning of the message id to select");
+                    println!("Type \"exit\" to exit back to the chat");
+                    println!("Leave input empty to continue up the conversation");
+                    Messages::new(conn, friend, None)
+                  } else {
+                    Messages::from_uids(conn, friend, sent, recv, None)
+                  };
+                let messages =
+                  messages
+                    .take(10)
+                    .collect::<Vec<_>>();
+                messages
+                  .iter()
+                  .rev()
+                  .for_each(|msg| {
+                    let from_id = msg.from;
+                    if from_id == conn.user_id {
+                      let from_username =
+                        conn.username.clone();
+                        let max_len = u64::MAX.to_string().len();
+                        let uid_str = format!("{:0>width$}", msg.uid.to_string(), width = max_len);
+                        println!("({:6}) {}: {}", &uid_str[..6], from_username, msg.message);
+                    } else {
+                      let from_username =
+                        username.clone();
+                        println!("{:8} {}: {}", "", from_username, msg.message);
+                    };
+                  });
+                let sent_messages = messages
+                  .iter()
+                  .filter(|m| m.from == conn.user_id)
+                  .collect::<Vec<_>>();
+                  
+                let recv_messages = messages
+                  .iter()
+                  .filter(|m| m.from != conn.user_id)
+                  .collect::<Vec<_>>();
+                  
+                print!("> ");
+                stdout().flush().unwrap();
+                input.clear();
+                stdin().read_line(&mut input).unwrap();
+                input.pop();
+                let selected_id = input.clone();
+                if selected_id.eq_ignore_ascii_case("exit") {
+                  println!("Returning to chat");
+                  Chat(i, j, username, None)
+                } else if selected_id.is_empty() {
+                  let sent =
+                    sent_messages
+                      .iter()
+                      .collect::<Vec<_>>()
+                      .last()
+                      .and_then(|m| m.prev);
+                  let recv =
+                    recv_messages
+                      .iter()
+                      .collect::<Vec<_>>()
+                      .last()
+                      .and_then(|m| { println!("{:?}", (m.uid, m.prev)); m.prev });
+                  println!("{:?}", (sent, recv));
+                  if sent.is_none() && recv.is_none() {
+                    println!("Reached end of chat.");
+                    Chat(i, j, username, None)
+                  } else {
+                    SelectMessage(i, j, username, sent, recv, next_state)
+                  }
+                } else {
+                  let max_len = u64::MAX.to_string().len();
+                  let match_uid =
+                    sent_messages
+                      .iter()
+                      .map(|m| m.uid)
+                      .filter(|uid|
+                        format!("{:0>width$}", uid.to_string(), width = max_len)
+                          .starts_with(&selected_id)
+                      )
+                      .collect::<Vec<_>>();
+                  let match_len = match_uid.len();
+                  match match_len {
+                    0 => {
+                      println!("No matching messages");
+                      SelectMessage(i, j, username, sent, recv, next_state)
+                    }
+                    1 => {
+                      let uid = match_uid[0];
+                      match next_state {
+                        AfterSelectMessage::Redact => RedactMessage(i, j, username, uid),
+                        AfterSelectMessage::Delete => {
+                          let pos =
+                            sent_messages
+                              .iter()
+                              .position(|m| m.uid == uid)
+                              .unwrap();
+                          let relink_uid =
+                            if pos == 0 {
+                              None
+                            } else {
+                              sent_messages
+                                .get(pos - 1)
+                                .map(|x| x.uid)
+                            };
+                          DeleteMessage(i, j, username, uid, relink_uid)
+                        }
+                      }
+                    }
+                    _ => {
+                      println!("Too many matches");
+                      SelectMessage(i, j, username, sent, recv, next_state)
+                    }
+                  }
+                }
+            }
+            RedactMessage(i, j, username, uid) => {
+              let server_conn = servers[i].conn.as_ref().unwrap();
+              let conn = &server_conn.conn;
+              let friends = &server_conn.friends;
+              let friend = friends[j].clone();
+              let friend = from_username(friend);
+              if redact_chat_message(conn, friend, uid).is_err() {
+                println!("Failed to redact message");
+              };
+              println!("Returning to chat");
+              Chat(i, j, username, None)
+            }
+            DeleteMessage(i, j, username, uid, relink_uid) => {
+              let server_conn = servers[i].conn.as_ref().unwrap();
+              let conn = &server_conn.conn;
+              let friends = &server_conn.friends;
+              let friend = friends[j].clone();
+              let friend = from_username(friend);
+              if delete_chat_message(conn, friend, uid, relink_uid).is_err() {
+                println!("Failed to delete message");
+              };
+              println!("Returning to chat");
+              Chat(i, j, username, None)
             }
         };
     }
