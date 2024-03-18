@@ -9,7 +9,7 @@ use rocket::{config::Environment, http::Status, Config, State};
 use rocket_contrib::json::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use synapsis::{client::{delete_chat, delete_user, send_chat_message, Connection}, crypto::{gen_pub, gen_ver}, network::{from_username, MessageData, PutData, RegisterData, UserID, UserVerification}};
+use synapsis::{client::{delete_chat, delete_user, redact_chat, send_chat_message, Connection}, crypto::{gen_pub, gen_ver}, network::{from_username, MessageData, PutData, RegisterData, UserID, UserVerification}};
 
 #[macro_use] extern crate rocket;
 
@@ -372,6 +372,45 @@ fn count_chat_deletion_performance() {
   let count: RequestCounters = serde_json::from_str(&res).expect("Failed to deserialize response");
 
   let path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "result", "chat_deletion_performance.json"].iter().collect();
+  let _ = std::fs::create_dir_all(path.parent().unwrap());
+  std::fs::write(path.clone(), serde_json::ser::to_string(&count).expect("Failed to serialize")).expect("Failed to write file");
+}
+
+#[test]
+fn count_chat_redaction_performance() {
+  let client = Client::new();
+
+  setup();
+
+  let test_data = get_test_data(String::from("test_setup_2.json"))
+    .expect("Failed to load test data");
+
+  let conns = setup_from_test_input(client.clone(), test_data, true);
+
+  client
+    .post(format!("{}/reset", proxy_addr()))
+    .send()
+    .expect("Failed to reset counter");
+
+  let redact_users = get_list_user_pairs(String::from("delete_chats.json"))
+    .expect("Failed to load test data");
+
+  redact_users
+    .iter()
+    .for_each(|(from, to)| {
+      let _ = redact_chat(conns.get(from).unwrap(), conns.get(to).unwrap().user_id);
+    });
+
+  let res =
+    client
+      .get(format!("{}/count", proxy_addr()))
+      .send()
+      .expect("Failed to get counter")
+      .text()
+      .expect("Failed to get counter");
+  let count: RequestCounters = serde_json::from_str(&res).expect("Failed to deserialize response");
+
+  let path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "result", "chat_redaction_performance.json"].iter().collect();
   let _ = std::fs::create_dir_all(path.parent().unwrap());
   std::fs::write(path.clone(), serde_json::ser::to_string(&count).expect("Failed to serialize")).expect("Failed to write file");
 }

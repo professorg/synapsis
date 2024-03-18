@@ -420,6 +420,19 @@ pub fn delete_chat(conn: &Connection, with: UserID) -> Result<(), String> {
     
 }
 
+pub fn redact_chat(conn: &Connection, with: UserID) -> Result<(), String> {
+  let messages = Messages::new(conn, with, None);
+  let res = messages
+    .map(|m| m.uid)
+    .map(|uid| redact_chat_message(conn, with, uid))
+    .reduce(|acc, e| acc.and(e));
+  match res {
+    None => Ok(()),
+    Some(res) => res,
+  }
+    
+}
+
 fn put_data(address: &str, client: &Client, data: PutData) -> reqwest::Result<Response> {
     client.put(address)
         .json(&data)
@@ -847,16 +860,10 @@ pub fn cmd_client(client: &reqwest::blocking::Client) {
               let friends = &servers[i].2;
               let friend = friends[j].clone();
               let friend = from_username(friend);
-              //TODO: Use separate iterator for only sent messages
-              let messages = Messages::new(&conn, friend, None); 
-              for message in messages {
-                if message.from == conn.user_id {
-                  let uid = message.uid;
-                  let res = redact_chat_message(conn, friend, uid);
-                  if let Err(msg) = res {
-                    println!("Error while deleting message: {}", msg);
-                  }
-                }
+              let res = redact_chat(conn, friend);
+              match res {
+                Err(s) => println!("{}", s),
+                Ok(_) => (),
               }
               FriendList(i) 
             }
